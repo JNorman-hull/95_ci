@@ -1,0 +1,295 @@
+---
+title: "Fixed-Width Sequential Confidence Interval Testing"
+author: "Josh Norman"
+date: "2025-07-08"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 8,
+  fig.height = 6,
+  fig.align = "center"
+)
+knitr::opts_knit$set(root.dir = getwd())
+```
+
+# 1. Introduction
+
+This analysis aims to produce a viable Fixed-Width Sequential Confidence Interval Testing method for designing live fish trials with defined points to accept or reject null hypothesis and continue testing.
+
+```{r test_output, eval = FALSE, include=FALSE}
+
+test <- tibble(
+  sample = 1:10,
+  n_mortality = 1:10
+)
+
+write.csv(test, "./output/test.csv", row.names = FALSE)
+
+```
+
+```{r test_input, eval = FALSE, include=FALSE}
+
+test_data  <- read.csv("./output/test.csv")
+
+# 1. Filter rows where sample == 1
+filter_sample1 <- test_data %>% filter(sample == 1)
+
+# 2. Filter rows where sample == 1 AND n_mortality == 1
+filter_sample1_mort1 <- test_data %>% filter(sample == 1, n_mortality == 1)
+
+# 3. Filter rows where n_mortality != 10
+filter_mort_not10 <- test_data %>% filter(n_mortality != 10)
+
+# 4. Filter rows where sample is in a list (1, 3, 5)
+filter_sample_in <- test_data %>% filter(sample %in% c(1, 3, 5))
+
+# 5. Filter for rows with MAX n_mortality
+filter_max_mort <- test_data %>% filter(n_mortality == max(n_mortality, na.rm = TRUE))
+
+# 6. Filter for rows with MIN sample
+filter_min_sample <- test_data %>% filter(sample == min(sample))
+
+# 7. Filter rows where n_mortality > 5
+filter_mort_gt5 <- test_data %>% filter(n_mortality > 5)
+
+# 8. Filter rows where sample is between 3 and 7 (inclusive)
+filter_sample_between <- test_data %>% filter(between(sample, 3, 7))
+
+# 9. Filter rows with NA in n_mortality
+filter_na_mort <- test_data %>% filter(is.na(n_mortality))
+
+# 10. Filter rows where n_mortality is NOT NA
+filter_non_na_mort <- test_data %>% filter(!is.na(n_mortality))
+
+```
+
+# 2. Required libraries
+
+```{r libraries, echo=FALSE}
+#library(here)
+library(tidyverse)
+library(binom)
+library(scales)
+#library(ggpubr)
+#library(gt)
+#library(kableExtra)
+
+```
+
+# 3. Helper functions
+
+```{r theme_jn, echo= FALSE, include = FALSE}
+
+theme_JN <- function(base_size=10){ 
+  theme_grey() %+replace%
+    theme(
+      axis.text = element_text(colour="black"),
+      axis.title = element_text(colour="black"),
+      axis.ticks = element_line(colour="black"),
+      panel.border = element_rect(colour = "black", fill=NA),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.background = element_blank(),
+      strip.background = element_rect(colour = "black",fill = NA),
+      panel.spacing.x = unit(12, "pt")
+    ) 
+}
+
+
+```
+
+### create_mortality_table
+
+Function to calculate 95% Wilson Confidence Intervals for each mortality at a given sample size
+
+```{r create_mortality_table, echo= FALSE, include = FALSE}
+ create_mortality_table<- function(
+    max_sample_size = 1000, 
+    step_size = 50,
+    lower_threshold = 94,
+    desired_surv = 98,
+    max_mortality_proportion = 0.10) {
+  
+  sample_sizes <- seq(0, max_sample_size, by = step_size)
+  
+  do.call(rbind, lapply(sample_sizes, function(n) {
+    n_mortality <- 0:floor(max_mortality_proportion * n)
+    
+    if (n == 0) {
+      percent <- rep(0, length(n_mortality))
+      lower <- rep(0, length(n_mortality))
+      upper <- rep(0, length(n_mortality))
+    } else {
+      conf <- binom.confint(n_mortality, n, methods = "wilson")
+      percent <- round(conf$mean * 100, 2)
+      lower <- round(conf$lower * 100, 2)
+      upper <- round(conf$upper * 100, 2)
+    }
+    
+    survival <- round(100 - percent, 2)
+    ci_lower_surv <- round(100 - upper, 2)
+    ci_upper_surv <- round(100 - lower, 2)
+    
+    decision <- case_when(
+      survival >= desired_surv & ci_lower_surv >= lower_threshold ~ "Accept H0",
+      ci_upper_surv < desired_surv ~ "Reject H0",
+      TRUE ~ "Continue"
+    )
+    
+    data.frame(
+      sample_size = n,
+      n_mortality = n_mortality,
+      survival = survival,
+      ci_lower_surv = ci_lower_surv,
+      ci_upper_surv = ci_upper_surv,
+      decision = factor(decision, levels = c("Accept H0", "Reject H0", "Continue"))
+    )
+  }))
+}
+
+```
+
+### create_decision_plot
+
+```{r create_decision_plot, echo= FALSE, include = FALSE}
+
+create_decision_plot <- function(mortality_table) {
+  # Calculate dynamic axis limits
+  x_limits <- c(
+    min(mortality_table$sample_size[mortality_table$sample_size > 0], na.rm = TRUE),
+    max(mortality_table$sample_size, na.rm = TRUE)
+  )
+  
+  y_max <- mortality_table %>% 
+    filter(sample_size == max(sample_size), decision == "Continue") %>%
+    pull(n_mortality) %>%
+    max(na.rm = TRUE)
+  
+  y_limits <- c(0, y_max * 1.05)  # Add 5% padding
+  
+  # Create plot
+  mortality_table %>%
+    filter(sample_size > 0) %>%
+    ggplot(aes(x = sample_size, y = n_mortality, color = decision)) +
+    geom_point(size = 2, alpha = 0.8) +
+    scale_color_manual(
+      values = c("Accept H0" = "green", "Reject H0" = "red", "Continue" = "grey50"),
+      aesthetics = c("color", "fill")
+    ) +
+    scale_y_continuous(
+      limits = y_limits,
+      breaks = pretty_breaks(),
+      expand = c(0, 0)
+    ) +
+    scale_x_continuous(
+      limits = x_limits,
+      breaks = pretty_breaks(),
+      expand = c(0, 0)
+    ) +
+    labs(
+      title = "Experimental Design Decision Boundaries",
+      subtitle = "Accept (meets both criteria) | Reject (upper bound < target) | Continue (neither)",
+      x = "Sample Size",
+      y = "Observed Mortality Count",
+      color = "Decision",
+      fill = "Decision"
+    ) +
+    theme_JN()
+}
+```
+
+# 4. Fixed-precision Sequential Confidence Interval Testing
+
+Fixed-width sequential confidence interval testing is a statistical method used to estimate a parameter (e.g., mean, proportion) with a predetermined precision while dynamically adjusting the sample size based on accumulating data. Unlike fixed-sample designs, this approach continuously monitors the width of the confidence interval (CI) during data collection, stopping only once the CI narrows to a pre-specified fixed width, ensuring the estimate meets the desired margin of error. Sequential testing is particularly useful when data collection is costly or time-consuming, as it often requires fewer observations than fixed-sample methods while maintaining statistical validity.
+
+We deviate from this principle by fixing our precision level as apposed to the width of the CI.
+
+## 4.1 Unadjusted CIs
+
+At each sampling point (e.g., every n = 100), calculate Wilson confidence intervals for observed mortality number. This will inherently deviate from fixed-width CI as the CI width is determined by observed mortality and sample size.
+
+Decision rules to estimate probability with a given precision level (differs from hypothesis based testing):
+
+-   Desired threshold for survival ≥ 98%
+
+-   Not fish-friendly : If upper 95% CI \< 98%
+
+-   Fish-friendly: If observed survival ≥ 98% and lower 95% CI ≥ 94%
+
+-   Continue testing: Otherwise
+
+The continue zone therefore directly controls the estimation error and we do not apply traditional hypothesis based testing.\
+\
+**Accepting only when results are clear and conservative (\>98% + LB ≥ 94%). Rejecting only when results are definitively bad (UB \< 98%). Continuing otherwise—no gray-area decisions.**
+
+**Type I/II Error Control**
+
+-   **Type I Error (False "Accept"):**
+
+    -   Controlled by requiring **LB ≥ 94% AND observed \> 98%**.
+
+    -   This is stricter than classic hypothesis tests (reduces false positives).
+
+-   **Type II Error (False "Reject"):**
+
+    -   Controlled by **only rejecting if UB \< 98%** (avoids premature rejection)
+
+**Conservatism**
+
+-   Our first sample occurs at 100, which has already significantly reduced our likelihood of committing a type I error. We simple maintain our artifical alpha spend linearly throughout the experiment. Bare in mind there is no true alpha when we are just examining within group probability and want a fixed precision. That will come in the next approach of comparing impact to control groups.
+
+-   The criteria for rejecting the null are already high by requiring an upper bounds to not include 98.
+
+-   Fixed lower bound rule is a conservative measure to guarantee fixed estimation lower bounds.
+
+Because this restriction is already conservative, we choose not to apply any further adjustment to the confidence intervals.
+
+#### 4.1.1 Build mortality table
+
+```{r mortality_table}
+
+mortality_data <- create_mortality_table(
+  max_sample_size = 1000,
+  step_size = 50,
+  lower_threshold = 94,
+  desired_surv = 98,
+  max_mortality_proportion = 0.2
+)
+
+mortality_sample_plot <- create_decision_plot(mortality_data)
+mortality_sample_plot
+
+```
+
+## 4.2 Adjusted CIs
+
+Alternatively, we could do Group-Sequential Design with Error-Spending
+
+We could use O'Brien-Fleming alpha spending curve IF we are willing to accept a wider confidence interval but want to prevent early acceptance which only represents random probability in the population e.g., you may need a sample size bigger than your first stop point if the effect is small. Pocock could be a useful method if we want to be more conservative towards rejection, as it is sensitive for extreme cases (0, 1), but requires increasing confidence to reject the null hypothesis e.g., saying a pump isn't fish-friendly, will require slightly more evidence
+
+# 5 Control group comparison
+
+When mortality occurs and we want to be certain the mortality would not occur if fish were not exposed to the pump, then we require statistical comparisons to a control group population.
+
+Unbalanced study design as large control group for small effect sizes undesired
+
+Use power of x, alpha of x and effect of x
+
+User can change these as desired
+
+Do a one-sided test as only looking to see if mortality in the control group is different to mortality in the impact group
+
+Pick the correct test for this type of data
+
+then build a SPRT were we determine likelihood of a significant test result to make decisions whilst testing fish
+
+Have correction in this for type 1 and 2 error
+
+Then simulate scenarios
+
+Do you always need high precision within group if we are also measuring comparison to control?
