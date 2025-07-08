@@ -114,6 +114,11 @@ Function to calculate 95% Wilson Confidence Intervals for each mortality at a gi
     lower_threshold = 94,
     desired_surv = 98,
     max_mortality_proportion = 0.10) {
+   
+    if (lower_threshold > desired_surv) {
+    stop("Error: `lower_threshold` (", lower_threshold, 
+         ") cannot be greater than `desired_surv` (", desired_surv, ")")
+  }
   
   sample_sizes <- seq(0, max_sample_size, by = step_size)
   
@@ -135,9 +140,11 @@ Function to calculate 95% Wilson Confidence Intervals for each mortality at a gi
     ci_lower_surv <- round(100 - upper, 2)
     ci_upper_surv <- round(100 - lower, 2)
     
-    decision <- case_when(
+  
+    
+     decision <- case_when(
       survival >= desired_surv & ci_lower_surv >= lower_threshold ~ "Accept H0",
-      ci_upper_surv < desired_surv ~ "Reject H0",
+      ci_upper_surv < desired_surv + 0.1 ~ "Reject H0",
       TRUE ~ "Continue"
     )
     
@@ -203,6 +210,7 @@ create_decision_plot <- function(mortality_table) {
 }
 ```
 
+
 # 4. Fixed-precision Sequential Confidence Interval Testing
 
 Fixed-width sequential confidence interval testing is a statistical method used to estimate a parameter (e.g., mean, proportion) with a predetermined precision while dynamically adjusting the sample size based on accumulating data. Unlike fixed-sample designs, this approach continuously monitors the width of the confidence interval (CI) during data collection, stopping only once the CI narrows to a pre-specified fixed width, ensuring the estimate meets the desired margin of error. Sequential testing is particularly useful when data collection is costly or time-consuming, as it often requires fewer observations than fixed-sample methods while maintaining statistical validity.
@@ -255,10 +263,10 @@ Because this restriction is already conservative, we choose not to apply any fur
 
 mortality_data <- create_mortality_table(
   max_sample_size = 1000,
-  step_size = 50,
+  step_size = 10,
   lower_threshold = 94,
   desired_surv = 98,
-  max_mortality_proportion = 0.2
+  max_mortality_proportion = 1
 )
 
 mortality_sample_plot <- create_decision_plot(mortality_data)
