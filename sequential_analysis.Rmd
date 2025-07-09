@@ -154,6 +154,8 @@ Function to calculate 95% Wilson Confidence Intervals for each mortality at a gi
       survival = survival,
       ci_lower_surv = ci_lower_surv,
       ci_upper_surv = ci_upper_surv,
+      desired_surv = desired_surv,
+      lower_threshold = lower_threshold,
       decision = factor(decision, levels = c("Accept H0", "Reject H0", "Continue"))
     )
   }))
@@ -163,154 +165,138 @@ Function to calculate 95% Wilson Confidence Intervals for each mortality at a gi
 
 ### create_decision_plot
 
-```{r create_decision_plot}
+```{r create_decision_plot, echo = FALSE, include = FALSE}
 
 # Complete modified function with smooth boundary lines
-create_decision_plot <- function(mortality_table, desired_surv = 98, lower_threshold = 94) {
-  # Calculate dynamic axis limits
+create_decision_plot <- function(mortality_table) {
+  # Extract parameters from table
+  desired_surv <- unique(mortality_table$desired_surv)[1]
+  lower_threshold <- unique(mortality_table$lower_threshold)[1]
+  
+  # Calculate plot limits
   x_limits <- c(
-    min(mortality_table$sample_size[mortality_table$sample_size > 0], na.rm = TRUE),
+    min(mortality_table$sample_size, na.rm = TRUE),
     max(mortality_table$sample_size, na.rm = TRUE)
   )
   
-  y_max <- mortality_table %>% 
-    filter(sample_size == max(sample_size), decision == "Continue") %>%
+  # Define y-axis visual crop limit based on "Continue" zone
+  y_crop_max <- mortality_table %>%
+    filter(decision == "Continue") %>%
     pull(n_mortality) %>%
     max(na.rm = TRUE)
   
-  y_limits <- c(0, y_max * 1.05)
+  y_crop_limits <- c(0, y_crop_max * 1.05)
   
-  # Create boundary points that extend to plot edges
+  # Create boundary data for regions
   continue_points <- mortality_table %>%
     filter(sample_size > 0, decision == "Continue")
   
-  # Create base plot without points
-  p <- ggplot() +
-    xlim(x_limits) +
-    ylim(y_limits)
+  # Build plot with regions if continue points exist
+  p <- ggplot() + xlim(x_limits)  # do not include ylim here
   
-  # Add filled regions if we have Continue points
   if(nrow(continue_points) > 0) {
-    # Find actual boundaries
-    boundaries_exact <- continue_points %>%
+    # Calculate smooth boundaries
+    boundaries <- continue_points %>%
       group_by(sample_size) %>%
       summarise(
-        max_continue = max(n_mortality),
-        min_continue = min(n_mortality),
+        upper_boundary = max(n_mortality) + 0.2,
+        lower_boundary = pmax(0, min(n_mortality) - 0.2),
         .groups = "drop"
       )
     
-    # Create boundary points with minimal buffer and extend well beyond plot edges
-    boundary_data <- boundaries_exact %>%
-      mutate(
-        upper_boundary = max_continue + 0.7,
-        lower_boundary = pmax(0, min_continue - 0.7)
-      ) %>%
-      # Add points well beyond plot edges to ensure full coverage
+    # Extend boundaries to exact plot limits
+    x_seq <- seq(x_limits[1], x_limits[2], length.out = 150)
+    
+    extended_boundaries <- boundaries %>%
       bind_rows(
         data.frame(
-          sample_size = c(x_limits[1] - 50, x_limits[2] + 50),
-          max_continue = NA,
-          min_continue = NA,
-          upper_boundary = c(first(.$upper_boundary), last(.$upper_boundary)),
-          lower_boundary = c(first(.$lower_boundary), last(.$lower_boundary))
+          sample_size = c(x_limits[1], x_limits[2]),
+          upper_boundary = c(first(boundaries$upper_boundary), last(boundaries$upper_boundary)),
+          lower_boundary = c(first(boundaries$lower_boundary), last(boundaries$lower_boundary))
         )
       ) %>%
       arrange(sample_size)
     
-    # Create smooth boundary predictions for filling
-    if(nrow(boundary_data) > 3) {
-      # Fit smooth models to get predictions across extended x range
-      x_seq <- seq(x_limits[1] - 10, x_limits[2] + 10, length.out = 150)
-      
-      # Fit and predict upper boundary
-      upper_model <- loess(upper_boundary ~ sample_size, data = boundary_data, span = 0.75)
-      upper_pred <- predict(upper_model, newdata = data.frame(sample_size = x_seq))
-      
-      # Fit and predict lower boundary  
-      lower_model <- loess(lower_boundary ~ sample_size, data = boundary_data, span = 0.75)
-      lower_pred <- predict(lower_model, newdata = data.frame(sample_size = x_seq))
-      
-      # Ensure predictions don't go below 0
-      lower_pred <- pmax(0, lower_pred)
-      
-      # Create data frame for ribbons
-      ribbon_data <- data.frame(
-        x = x_seq,
-        upper = upper_pred,
-        lower = lower_pred
-      )
-      
-      # Add filled regions
-      # Reject region (above upper boundary)
-      p <- p + geom_ribbon(data = ribbon_data,
-                          aes(x = x, ymin = upper, ymax = y_limits[2]),
-                          fill = "red", alpha = 0.2)
-      
-      # Continue region (between boundaries)
-      p <- p + geom_ribbon(data = ribbon_data,
-                          aes(x = x, ymin = lower, ymax = upper),
-                          fill = "grey", alpha = 0.2)
-      
-      # Accept region (below lower boundary)
-      p <- p + geom_ribbon(data = ribbon_data,
-                          aes(x = x, ymin = 0, ymax = lower),
-                          fill = "green", alpha = 0.2)
-      
-      # Add boundary lines
-      p <- p + geom_line(data = ribbon_data,
-                        aes(x = x, y = upper),
-                        color = "black")
-      
-      p <- p + geom_line(data = ribbon_data,
-                        aes(x = x, y = lower),
-                        color = "black")
-    }
+    # Create smooth predictions using extended boundaries
+    upper_pred <- predict(loess(upper_boundary ~ sample_size, data = extended_boundaries, span = 1), 
+                          newdata = data.frame(sample_size = x_seq))
+    lower_pred <- pmax(0, predict(loess(lower_boundary ~ sample_size, data = extended_boundaries, span = 1), 
+                                  newdata = data.frame(sample_size = x_seq)))
+    
+    ribbon_data <- data.frame(x = x_seq, upper = upper_pred, lower = lower_pred)
+    
+    # Add all regions and boundaries at once
+    p <- p + 
+      geom_ribbon(data = ribbon_data, aes(x = x, ymin = upper, ymax = y_crop_limits[2]), 
+                  fill = "red", alpha = 0.2) +
+      geom_ribbon(data = ribbon_data, aes(x = x, ymin = lower, ymax = upper), 
+                  fill = "grey", alpha = 0.2) +
+      geom_ribbon(data = ribbon_data, aes(x = x, ymin = 0, ymax = lower), 
+                  fill = "green", alpha = 0.2) +
+      geom_line(data = ribbon_data, aes(x = x, y = upper), color = "black") +
+      geom_line(data = ribbon_data, aes(x = x, y = lower), color = "black")
   }
   
- p <- p +
-    annotate("text", x = x_limits[2] * 0.25, y = y_limits[2] * 0.85, 
+      y_breaks <- function(lims) {
+      y_min <- floor(lims[1])
+      y_max <- ceiling(lims[2])
+      range <- y_max - y_min
+      
+      interval <- case_when(
+        y_max < 50 ~ 1,
+        y_max < 100 ~ 10,
+        TRUE ~ 50
+      )
+      
+      breaks <- seq(y_min, y_max, by = interval)
+      
+      # Ensure min and max are included
+      if (!(y_min %in% breaks)) breaks <- c(y_min, breaks)
+      if (!(y_max %in% breaks)) breaks <- c(breaks, y_max)
+      
+      sort(unique(breaks))
+      }
+      
+      x_breaks <- function(lims) {
+        x_min <- floor(lims[1])
+        x_max <- ceiling(lims[2])
+        
+        interval <- if (x_max < 200) 10 else 100
+        
+        seq(x_min, x_max, by = interval)
+      }
+            
+      
+  # Add annotations and styling
+  p + 
+    annotate("text", x = x_limits[2] * 0.25, y = y_crop_limits[2] * 0.85, 
              label = "Reject H0: Not fish-friendly", size = 4) +
-    annotate("text", x = mean(x_limits), y = mean(y_limits), 
+    annotate("text", x = mean(x_limits), y = mean(y_crop_limits), 
              label = "Precision not achieved: Continue testing", size = 4) +
-    annotate("text", x = x_limits[2] * 0.75, y = y_limits[2] * 0.15, 
-             label = "Accept H0: Fish-friendly", size = 4)
-  
-  # Add dynamic parameter labels
-  param_text <- paste0("CI = 95% (Wilson Binomial)\n",
-                      "Desired survival ≥ ", desired_surv, "%\n",
-                      "Lower bound threshold ≥ ", lower_threshold, "%")
-  
-  p <- p +
-    annotate("text", x = x_limits[2] * 0.98, y = y_limits[2] * 0.98, 
-             label = param_text, size = 4, hjust = 1, vjust = 1,
-             fontface = "italic")
-  
-  # Add styling
-  p <- p +
+    annotate("text", x = x_limits[2] * 0.75, y = y_crop_limits[2] * 0.15, 
+             label = "Accept H0: Fish-friendly", size = 4) +
+    annotate("text", x = x_limits[2] * 0.98, y = y_crop_limits[2] * 0.98, 
+             label = paste0("CI = 95% (Wilson Binomial)\nDesired survival ≥ ", desired_surv, 
+                            "%\nLower bound threshold ≥ ", lower_threshold, "%"), 
+             size = 4, hjust = 1, vjust = 1, fontface = "italic") +
     scale_y_continuous(
-      limits = y_limits,
-      breaks = pretty_breaks(),
+      breaks = y_breaks(y_crop_limits),
       expand = c(0, 0)
     ) +
     scale_x_continuous(
       limits = x_limits,
-      breaks = pretty_breaks(),
+      breaks = x_breaks(x_limits),
       expand = c(0, 0)
-    ) +
-    labs(
-      x = "Sample Size",
-      y = "Mortality (n)"
-    ) +
-    theme_JN() +
-    theme(
-      panel.grid.major = element_line(color = "white", size = 0.5),
-      panel.grid.minor = element_line(color = "white", size = 0.3)
     )+
-    coord_cartesian(clip = "off")
-  
-  return(p)
+    labs(x = "Sample Size", y = "Mortality (n)") +
+    theme_JN() +
+     theme(
+      panel.grid.major = element_line(color = alpha("black", 0.1), size = 0.5),
+      panel.ontop = FALSE 
+    ) +
+    coord_cartesian(ylim = y_crop_limits, clip = "off")  # visual crop only
 }
+
 
 ```
 
@@ -365,23 +351,23 @@ Because this restriction is already conservative, we choose not to apply any fur
 
 #### 4.1.1 Build mortality table
 
+For borderline cases, check the threshold against mortality table to establish exact criteria 
+
 ```{r mortality_table}
 
 mortality_data <- create_mortality_table(
-  max_sample_size = 100,
+  max_sample_size = 1000,
   step_size = 10,
-  lower_threshold = 94,
+  lower_threshold = 96,
   desired_surv = 98,
   max_mortality_proportion = 1
 )
 
-#This needs to be saving desird surv and lower threshold in the tibble
-
 mortality_sample_plot <- create_decision_plot(mortality_data)
 mortality_sample_plot
 
-#ggsave(filename = "./output/mortality.svg", plot = mortality_sample_plot,
-#       units="cm",width=12,height=10)
+ggsave(filename = "./output/mortality.svg", plot = mortality_sample_plot,
+      units="cm",width=14,height=14)
 
 ```
 
