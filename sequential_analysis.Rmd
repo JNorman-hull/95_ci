@@ -163,9 +163,10 @@ Function to calculate 95% Wilson Confidence Intervals for each mortality at a gi
 
 ### create_decision_plot
 
-```{r create_decision_plot, echo= FALSE, include = FALSE}
+```{r create_decision_plot}
 
-create_decision_plot <- function(mortality_table) {
+# Complete modified function with smooth boundary lines
+create_decision_plot <- function(mortality_table, desired_surv = 98, lower_threshold = 94) {
   # Calculate dynamic axis limits
   x_limits <- c(
     min(mortality_table$sample_size[mortality_table$sample_size > 0], na.rm = TRUE),
@@ -177,17 +178,116 @@ create_decision_plot <- function(mortality_table) {
     pull(n_mortality) %>%
     max(na.rm = TRUE)
   
-  y_limits <- c(0, y_max * 1.05)  # Add 5% padding
+  y_limits <- c(0, y_max * 1.05)
   
-  # Create plot
-  mortality_table %>%
-    filter(sample_size > 0) %>%
-    ggplot(aes(x = sample_size, y = n_mortality, color = decision)) +
-    geom_point(size = 2, alpha = 0.8) +
-    scale_color_manual(
-      values = c("Accept H0" = "green", "Reject H0" = "red", "Continue" = "grey50"),
-      aesthetics = c("color", "fill")
-    ) +
+  # Create boundary points that extend to plot edges
+  continue_points <- mortality_table %>%
+    filter(sample_size > 0, decision == "Continue")
+  
+  # Create base plot without points
+  p <- ggplot() +
+    xlim(x_limits) +
+    ylim(y_limits)
+  
+  # Add filled regions if we have Continue points
+  if(nrow(continue_points) > 0) {
+    # Find actual boundaries
+    boundaries_exact <- continue_points %>%
+      group_by(sample_size) %>%
+      summarise(
+        max_continue = max(n_mortality),
+        min_continue = min(n_mortality),
+        .groups = "drop"
+      )
+    
+    # Create boundary points with minimal buffer and extend well beyond plot edges
+    boundary_data <- boundaries_exact %>%
+      mutate(
+        upper_boundary = max_continue + 0.7,
+        lower_boundary = pmax(0, min_continue - 0.7)
+      ) %>%
+      # Add points well beyond plot edges to ensure full coverage
+      bind_rows(
+        data.frame(
+          sample_size = c(x_limits[1] - 50, x_limits[2] + 50),
+          max_continue = NA,
+          min_continue = NA,
+          upper_boundary = c(first(.$upper_boundary), last(.$upper_boundary)),
+          lower_boundary = c(first(.$lower_boundary), last(.$lower_boundary))
+        )
+      ) %>%
+      arrange(sample_size)
+    
+    # Create smooth boundary predictions for filling
+    if(nrow(boundary_data) > 3) {
+      # Fit smooth models to get predictions across extended x range
+      x_seq <- seq(x_limits[1] - 10, x_limits[2] + 10, length.out = 150)
+      
+      # Fit and predict upper boundary
+      upper_model <- loess(upper_boundary ~ sample_size, data = boundary_data, span = 0.75)
+      upper_pred <- predict(upper_model, newdata = data.frame(sample_size = x_seq))
+      
+      # Fit and predict lower boundary  
+      lower_model <- loess(lower_boundary ~ sample_size, data = boundary_data, span = 0.75)
+      lower_pred <- predict(lower_model, newdata = data.frame(sample_size = x_seq))
+      
+      # Ensure predictions don't go below 0
+      lower_pred <- pmax(0, lower_pred)
+      
+      # Create data frame for ribbons
+      ribbon_data <- data.frame(
+        x = x_seq,
+        upper = upper_pred,
+        lower = lower_pred
+      )
+      
+      # Add filled regions
+      # Reject region (above upper boundary)
+      p <- p + geom_ribbon(data = ribbon_data,
+                          aes(x = x, ymin = upper, ymax = y_limits[2]),
+                          fill = "red", alpha = 0.2)
+      
+      # Continue region (between boundaries)
+      p <- p + geom_ribbon(data = ribbon_data,
+                          aes(x = x, ymin = lower, ymax = upper),
+                          fill = "grey", alpha = 0.2)
+      
+      # Accept region (below lower boundary)
+      p <- p + geom_ribbon(data = ribbon_data,
+                          aes(x = x, ymin = 0, ymax = lower),
+                          fill = "green", alpha = 0.2)
+      
+      # Add boundary lines
+      p <- p + geom_line(data = ribbon_data,
+                        aes(x = x, y = upper),
+                        color = "black")
+      
+      p <- p + geom_line(data = ribbon_data,
+                        aes(x = x, y = lower),
+                        color = "black")
+    }
+  }
+  
+ p <- p +
+    annotate("text", x = x_limits[2] * 0.25, y = y_limits[2] * 0.85, 
+             label = "Reject H0: Not fish-friendly", size = 4) +
+    annotate("text", x = mean(x_limits), y = mean(y_limits), 
+             label = "Precision not achieved: Continue testing", size = 4) +
+    annotate("text", x = x_limits[2] * 0.75, y = y_limits[2] * 0.15, 
+             label = "Accept H0: Fish-friendly", size = 4)
+  
+  # Add dynamic parameter labels
+  param_text <- paste0("CI = 95% (Wilson Binomial)\n",
+                      "Desired survival ≥ ", desired_surv, "%\n",
+                      "Lower bound threshold ≥ ", lower_threshold, "%")
+  
+  p <- p +
+    annotate("text", x = x_limits[2] * 0.98, y = y_limits[2] * 0.98, 
+             label = param_text, size = 4, hjust = 1, vjust = 1,
+             fontface = "italic")
+  
+  # Add styling
+  p <- p +
     scale_y_continuous(
       limits = y_limits,
       breaks = pretty_breaks(),
@@ -199,15 +299,19 @@ create_decision_plot <- function(mortality_table) {
       expand = c(0, 0)
     ) +
     labs(
-      title = "Experimental Design Decision Boundaries",
-      subtitle = "Accept (meets both criteria) | Reject (upper bound < target) | Continue (neither)",
       x = "Sample Size",
-      y = "Observed Mortality Count",
-      color = "Decision",
-      fill = "Decision"
+      y = "Mortality (n)"
     ) +
-    theme_JN()
+    theme_JN() +
+    theme(
+      panel.grid.major = element_line(color = "white", size = 0.5),
+      panel.grid.minor = element_line(color = "white", size = 0.3)
+    )+
+    coord_cartesian(clip = "off")
+  
+  return(p)
 }
+
 ```
 
 
@@ -249,7 +353,9 @@ The continue zone therefore directly controls the estimation error and we do not
 
 **Conservatism**
 
--   Our first sample occurs at 100, which has already significantly reduced our likelihood of committing a type I error. We simple maintain our artifical alpha spend linearly throughout the experiment. Bare in mind there is no true alpha when we are just examining within group probability and want a fixed precision. That will come in the next approach of comparing impact to control groups.
+-   Sequential testing is required in our application as we do not have sufficient knowledge of the actual mortality rate to apply a fixed sample size. 
+
+-   Our first sample occurs at 100, which has already significantly reduced our likelihood of committing a type I error. We simple maintain our artificial alpha spend linearly throughout the experiment. Bare in mind there is no true alpha when we are just examining within group probability and want a fixed precision. That will come in the next approach of comparing impact to control groups.
 
 -   The criteria for rejecting the null are already high by requiring an upper bounds to not include 98.
 
@@ -262,15 +368,20 @@ Because this restriction is already conservative, we choose not to apply any fur
 ```{r mortality_table}
 
 mortality_data <- create_mortality_table(
-  max_sample_size = 1000,
+  max_sample_size = 100,
   step_size = 10,
   lower_threshold = 94,
   desired_surv = 98,
   max_mortality_proportion = 1
 )
 
+#This needs to be saving desird surv and lower threshold in the tibble
+
 mortality_sample_plot <- create_decision_plot(mortality_data)
 mortality_sample_plot
+
+#ggsave(filename = "./output/mortality.svg", plot = mortality_sample_plot,
+#       units="cm",width=12,height=10)
 
 ```
 
