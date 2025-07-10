@@ -75,231 +75,17 @@ filter_non_na_mort <- test_data %>% filter(!is.na(n_mortality))
 library(tidyverse)
 library(binom)
 library(scales)
+library(plotly)
 #library(ggpubr)
 #library(gt)
 #library(kableExtra)
 
+#Source functions for calculations, plots etc
+source("./functions.R")
+
 ```
 
 # 3. Helper functions
-
-```{r theme_jn, echo= FALSE, include = FALSE}
-
-theme_JN <- function(base_size=10){ 
-  theme_grey() %+replace%
-    theme(
-      axis.text = element_text(colour="black"),
-      axis.title = element_text(colour="black"),
-      axis.ticks = element_line(colour="black"),
-      panel.border = element_rect(colour = "black", fill=NA),
-      panel.grid.major = element_blank(),
-      panel.grid.minor = element_blank(),
-      panel.background = element_blank(),
-      strip.background = element_rect(colour = "black",fill = NA),
-      panel.spacing.x = unit(12, "pt")
-    ) 
-}
-
-
-```
-
-### create_mortality_table
-
-Function to calculate 95% Wilson Confidence Intervals for each mortality at a given sample size
-
-```{r create_mortality_table, echo= FALSE, include = FALSE}
- create_mortality_table<- function(
-    max_sample_size = 1000, 
-    step_size = 50,
-    lower_threshold = 94,
-    desired_surv = 98,
-    max_mortality_proportion = 0.10) {
-   
-    if (lower_threshold > desired_surv) {
-    stop("Error: `lower_threshold` (", lower_threshold, 
-         ") cannot be greater than `desired_surv` (", desired_surv, ")")
-  }
-  
-  sample_sizes <- seq(0, max_sample_size, by = step_size)
-  
-  do.call(rbind, lapply(sample_sizes, function(n) {
-    n_mortality <- 0:floor(max_mortality_proportion * n)
-    
-    if (n == 0) {
-      percent <- rep(0, length(n_mortality))
-      lower <- rep(0, length(n_mortality))
-      upper <- rep(0, length(n_mortality))
-    } else {
-      conf <- binom.confint(n_mortality, n, methods = "wilson")
-      percent <- round(conf$mean * 100, 2)
-      lower <- round(conf$lower * 100, 2)
-      upper <- round(conf$upper * 100, 2)
-    }
-    
-    survival <- round(100 - percent, 2)
-    ci_lower_surv <- round(100 - upper, 2)
-    ci_upper_surv <- round(100 - lower, 2)
-    
-  
-    
-     decision <- case_when(
-      survival >= desired_surv & ci_lower_surv >= lower_threshold ~ "Accept H0",
-      ci_upper_surv < desired_surv + 0.1 ~ "Reject H0",
-      TRUE ~ "Continue"
-    )
-    
-    data.frame(
-      sample_size = n,
-      n_mortality = n_mortality,
-      survival = survival,
-      ci_lower_surv = ci_lower_surv,
-      ci_upper_surv = ci_upper_surv,
-      desired_surv = desired_surv,
-      lower_threshold = lower_threshold,
-      decision = factor(decision, levels = c("Accept H0", "Reject H0", "Continue"))
-    )
-  }))
-}
-
-```
-
-### create_decision_plot
-
-```{r create_decision_plot, echo = FALSE, include = FALSE}
-
-# Complete modified function with smooth boundary lines
-create_decision_plot <- function(mortality_table) {
-  # Extract parameters from table
-  desired_surv <- unique(mortality_table$desired_surv)[1]
-  lower_threshold <- unique(mortality_table$lower_threshold)[1]
-  
-  # Calculate plot limits
-  x_limits <- c(
-    min(mortality_table$sample_size, na.rm = TRUE),
-    max(mortality_table$sample_size, na.rm = TRUE)
-  )
-  
-  # Define y-axis visual crop limit based on "Continue" zone
-  y_crop_max <- mortality_table %>%
-    filter(decision == "Continue") %>%
-    pull(n_mortality) %>%
-    max(na.rm = TRUE)
-  
-  y_crop_limits <- c(0, y_crop_max * 1.05)
-  
-  # Create boundary data for regions
-  continue_points <- mortality_table %>%
-    filter(sample_size > 0, decision == "Continue")
-  
-  # Build plot with regions if continue points exist
-  p <- ggplot() + xlim(x_limits)  # do not include ylim here
-  
-  if(nrow(continue_points) > 0) {
-    # Calculate smooth boundaries
-    boundaries <- continue_points %>%
-      group_by(sample_size) %>%
-      summarise(
-        upper_boundary = max(n_mortality) + 0.2,
-        lower_boundary = pmax(0, min(n_mortality) - 0.2),
-        .groups = "drop"
-      )
-    
-    # Extend boundaries to exact plot limits
-    x_seq <- seq(x_limits[1], x_limits[2], length.out = 150)
-    
-    extended_boundaries <- boundaries %>%
-      bind_rows(
-        data.frame(
-          sample_size = c(x_limits[1], x_limits[2]),
-          upper_boundary = c(first(boundaries$upper_boundary), last(boundaries$upper_boundary)),
-          lower_boundary = c(first(boundaries$lower_boundary), last(boundaries$lower_boundary))
-        )
-      ) %>%
-      arrange(sample_size)
-    
-    # Create smooth predictions using extended boundaries
-    upper_pred <- predict(loess(upper_boundary ~ sample_size, data = extended_boundaries, span = 1), 
-                          newdata = data.frame(sample_size = x_seq))
-    lower_pred <- pmax(0, predict(loess(lower_boundary ~ sample_size, data = extended_boundaries, span = 1), 
-                                  newdata = data.frame(sample_size = x_seq)))
-    
-    ribbon_data <- data.frame(x = x_seq, upper = upper_pred, lower = lower_pred)
-    
-    # Add all regions and boundaries at once
-    p <- p + 
-      geom_ribbon(data = ribbon_data, aes(x = x, ymin = upper, ymax = y_crop_limits[2]), 
-                  fill = "red", alpha = 0.2) +
-      geom_ribbon(data = ribbon_data, aes(x = x, ymin = lower, ymax = upper), 
-                  fill = "grey", alpha = 0.2) +
-      geom_ribbon(data = ribbon_data, aes(x = x, ymin = 0, ymax = lower), 
-                  fill = "green", alpha = 0.2) +
-      geom_line(data = ribbon_data, aes(x = x, y = upper), color = "black") +
-      geom_line(data = ribbon_data, aes(x = x, y = lower), color = "black")
-  }
-  
-      y_breaks <- function(lims) {
-      y_min <- floor(lims[1])
-      y_max <- ceiling(lims[2])
-      range <- y_max - y_min
-      
-      interval <- case_when(
-        y_max < 50 ~ 1,
-        y_max < 100 ~ 10,
-        TRUE ~ 50
-      )
-      
-      breaks <- seq(y_min, y_max, by = interval)
-      
-      # Ensure min and max are included
-      if (!(y_min %in% breaks)) breaks <- c(y_min, breaks)
-      if (!(y_max %in% breaks)) breaks <- c(breaks, y_max)
-      
-      sort(unique(breaks))
-      }
-      
-      x_breaks <- function(lims) {
-        x_min <- floor(lims[1])
-        x_max <- ceiling(lims[2])
-        
-        interval <- if (x_max < 200) 10 else 100
-        
-        seq(x_min, x_max, by = interval)
-      }
-            
-      
-  # Add annotations and styling
-  p + 
-    annotate("text", x = x_limits[2] * 0.25, y = y_crop_limits[2] * 0.85, 
-             label = "Reject H0: Not fish-friendly", size = 4) +
-    annotate("text", x = mean(x_limits), y = mean(y_crop_limits), 
-             label = "Precision not achieved: Continue testing", size = 4) +
-    annotate("text", x = x_limits[2] * 0.75, y = y_crop_limits[2] * 0.15, 
-             label = "Accept H0: Fish-friendly", size = 4) +
-    annotate("text", x = x_limits[2] * 0.98, y = y_crop_limits[2] * 0.98, 
-             label = paste0("CI = 95% (Wilson Binomial)\nDesired survival ≥ ", desired_surv, 
-                            "%\nLower bound threshold ≥ ", lower_threshold, "%"), 
-             size = 4, hjust = 1, vjust = 1, fontface = "italic") +
-    scale_y_continuous(
-      breaks = y_breaks(y_crop_limits),
-      expand = c(0, 0)
-    ) +
-    scale_x_continuous(
-      limits = x_limits,
-      breaks = x_breaks(x_limits),
-      expand = c(0, 0)
-    )+
-    labs(x = "Sample Size", y = "Mortality (n)") +
-    theme_JN() +
-     theme(
-      panel.grid.major = element_line(color = alpha("black", 0.1), size = 0.5),
-      panel.ontop = FALSE 
-    ) +
-    coord_cartesian(ylim = y_crop_limits, clip = "off")  # visual crop only
-}
-
-
-```
-
 
 # 4. Fixed-precision Sequential Confidence Interval Testing
 
@@ -308,6 +94,8 @@ Fixed-width sequential confidence interval testing is a statistical method used 
 We deviate from this principle by fixing our precision level as apposed to the width of the CI.
 
 ## 4.1 Unadjusted CIs
+
+Ensure we calculate our confidence intervals based on the survival probability, NOT, the mortality probability. This may be a source of error for the previous differences in calculations. 
 
 At each sampling point (e.g., every n = 100), calculate Wilson confidence intervals for observed mortality number. This will inherently deviate from fixed-width CI as the CI width is determined by observed mortality and sample size.
 
@@ -363,6 +151,8 @@ mortality_data <- create_mortality_table(
   max_mortality_proportion = 1
 )
 
+#write.csv(mortality_data, "./output/mortality_data.csv", row.names = FALSE)
+
 mortality_sample_plot <- create_decision_plot(mortality_data)
 mortality_sample_plot
 
@@ -370,6 +160,60 @@ ggsave(filename = "./output/mortality.svg", plot = mortality_sample_plot,
       units="cm",width=14,height=14)
 
 ```
+
+```{r plotly, echo=FALSE, eval = FALSE}
+
+
+decision_point <- mortality_sample_plot +
+  geom_point(data = mortality_data, 
+             aes(x = sample_size, y = n_mortality, 
+                 text = survival_formatted, color = decision),
+             alpha = 0, size = 1)
+
+decision_point_plotly <- ggplotly(decision_point, tooltip = "text")
+
+decision_point_plotly
+
+```
+
+### 4.1.2 Simulating sequntial choice scenarios
+
+We must validate our approach to sequentially testing survival under different true mortality scenarios.
+This demonstrates the practical implications for trial designs.
+
+```{r}
+
+simulation_results <- simulate_sequential_trial(
+  simulations = 1:1000,
+  max_sample = 1000,
+  true_survival_rates = 0.98,  # 90% to 100% in 1% steps
+  check_intervals = c(100, 200, 300, 400, 500, 600, 700, 800, 900, 1000), 
+  mortality_table = mortality_data
+)
+
+#write.csv(simulation_results, "./output/simulation_results.csv", row.names = FALSE)
+
+
+# Plot journeys for 98% survival
+journey_plot_5 <- create_journey_plot(mortality_data, simulation_results, 
+                                      survival_rate_to_show = 0.98, 
+                                      n_journeys = 5)
+journey_plot_5
+journey_plot_20
+# Show 20 journeys
+journey_plot_20 <- create_journey_plot(mortality_data, simulation_results, 
+                                       survival_rate_to_show = 0.98, 
+                                       n_journeys = 500)
+
+# Show specific journey IDs
+journey_plot_specific <- create_journey_plot(mortality_data, simulation_results, 
+                                             survival_rate_to_show = 0.98, 
+                                             journey_ids = c(1, 5, 10, 15, 20))
+
+
+
+```
+
 
 ## 4.2 Adjusted CIs
 
@@ -379,9 +223,31 @@ We could use O'Brien-Fleming alpha spending curve IF we are willing to accept a 
 
 # 5 Control group comparison
 
+When mortality is rare (e.g., 2%), the absolute survival rate tells you that it's high, but not whether the system caused harm.
+
+Example:
+Pump group: 98% survival (2% mortality)
+
+Is that 2% due to the pump? Or would we have seen it anyway?
+
+Without a control group (e.g., fish handled but not pumped), you can't tell if:
+
+That 2% is normal background mortality (e.g., stress, capture)
+
+Or whether the pump adds additional risk
+
 When mortality occurs and we want to be certain the mortality would not occur if fish were not exposed to the pump, then we require statistical comparisons to a control group population.
 
 Unbalanced study design as large control group for small effect sizes undesired
+
+Use a ratio of 3:1 or 4:1 (justified by literature)
+
+test options
+
+z-test proportions
+fishers exact (where control mortality is 0)
+GLMM (where mixed effects are desired)
+
 
 Use power of x, alpha of x and effect of x
 
