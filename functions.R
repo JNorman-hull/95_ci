@@ -1,8 +1,7 @@
-
-
 #  Statistical tools  ####
 
 # Build mortality table with 95% CI (Wilson binomial)
+# mortality_table dependency is a tibble created by create_mortality_table() can be named otherwise
 
 create_mortality_table<- function(
     max_sample_size = 1000, 
@@ -60,76 +59,229 @@ create_mortality_table<- function(
   }))
 }
 
+# Lookup mortality data from table
+
+lookup_mortality_data <- function(mortality_table, sample_size, n_deaths) {
+  result <- mortality_table %>%
+    filter(sample_size == !!sample_size, n_mortality == !!n_deaths) %>%
+    select(sample_size, n_mortality, survival, ci_lower_surv, ci_upper_surv, 
+           decision, survival_formatted)
+  
+  if(nrow(result) == 0) {
+    cat("No match found for sample_size =", sample_size, ", n_mortality =", n_deaths, "\n")
+    return(NULL)
+  }
+  
+  return(result)
+}
+
+# Simulate sequential trial design
 
 simulate_sequential_trial <- function(simulations = 1:50, 
                                       true_survival_rates = seq(0.9, 1, by = 0.01), 
                                       max_sample = 500, 
-                                      check_intervals = c(100, 200, 300, 400, 500, 600, 700, 800, 900, 1000),
-                                      mortality_table) {
+                                      check_intervals = c(100, 200, 300, 400, 500),
+                                      mortality_table,
+                                      recapture_rates = c(1.0)) {  # Accept vector of rates
   
   # Initialize results
   all_results <- tibble()
   
   # Loop through each simulation
   for(sim_id in simulations) {
-    # Loop through each survival rate
-    for(survival_rate in true_survival_rates) {
-      
-      # Initialize for this specific simulation
-      results <- tibble(
-        interval = integer(),
-        cumulative_n = integer(),
-        cumulative_survivors = integer(),
-        cumulative_deaths = integer(),
-        decision = character(),
-        trial_stopped = logical()
-      )
-      
-      cumulative_survivors <- 0
-      
-      # Run through check intervals
-      for(interval in check_intervals) {
-        if(interval == check_intervals[1]) {
-          new_survivors <- rbinom(1, interval, survival_rate)
-        } else {
-          prev_n <- check_intervals[which(check_intervals == interval) - 1]
-          interval_size <- interval - prev_n
-          new_survivors <- rbinom(1, interval_size, survival_rate)
+    # Loop through each recapture rate  
+    for(recapture_rate in recapture_rates) {
+      # Loop through each survival rate
+      for(survival_rate in true_survival_rates) {
+        
+        # Initialize for this specific simulation
+        results <- tibble(
+          interval = integer(),
+          cumulative_n = integer(),
+          cumulative_survivors = integer(),
+          cumulative_deaths = integer(),
+          decision = character(),
+          trial_stopped = logical()
+        )
+        
+        cumulative_survivors <- 0
+        
+        # Run through check intervals
+        for(interval in check_intervals) {
+          if(interval == check_intervals[1]) {
+            interval_size <- interval
+          } else {
+            prev_n <- check_intervals[which(check_intervals == interval) - 1]
+            interval_size <- interval - prev_n
+          }
+          
+          # Generate true outcomes
+          true_new_survivors <- rbinom(1, interval_size, survival_rate)
+          true_new_deaths <- interval_size - true_new_survivors
+          
+          # Apply recapture rate
+          recaptured_alive <- rbinom(1, true_new_survivors, recapture_rate)
+          recaptured_dead <- rbinom(1, true_new_deaths, recapture_rate)
+          total_recaptured <- recaptured_alive + recaptured_dead
+          
+          # Calculate observed survival rate from recaptured fish
+          if(total_recaptured > 0) {
+            observed_survival_rate <- recaptured_alive / total_recaptured
+          } else {
+            observed_survival_rate <- survival_rate  # Fallback
+          }
+          
+          # Estimate total outcomes using proportional assumption
+          estimated_new_deaths <- interval_size * (1 - observed_survival_rate)
+          cumulative_survivors <- cumulative_survivors + (interval_size - estimated_new_deaths)
+          cumulative_deaths <- interval - cumulative_survivors
+          
+          # Round estimated deaths for lookup
+          cumulative_deaths_rounded <- round(cumulative_deaths)
+          
+          # Look up decision using estimated totals
+          decision_row <- mortality_table %>% 
+            filter(sample_size == interval, n_mortality == cumulative_deaths_rounded)
+          
+          current_decision <- if(nrow(decision_row) > 0) decision_row$decision[1] else "Continue"
+          
+          # Add to results
+          results <- results %>% 
+            add_row(
+              interval = interval,
+              cumulative_n = interval,
+              cumulative_survivors = cumulative_survivors,
+              cumulative_deaths = cumulative_deaths,
+              decision = current_decision,
+              trial_stopped = current_decision != "Continue"
+            )
+          
+          # Stop if decision reached
+          if(current_decision != "Continue") break
         }
         
-        cumulative_survivors <- cumulative_survivors + new_survivors
-        cumulative_deaths <- interval - cumulative_survivors
+        # Add simulation metadata and combine
+        results <- results %>%
+          mutate(sim_id = sim_id, 
+                 true_survival_rate = survival_rate,
+                 recapture_rate = recapture_rate)  # Add this column
         
-        # Look up decision
-        decision_row <- mortality_table %>% 
-          filter(sample_size == interval, n_mortality == cumulative_deaths)
-        
-        current_decision <- if(nrow(decision_row) > 0) decision_row$decision[1] else "Continue"
-        
-        # Add to results
-        results <- results %>% 
-          add_row(
-            interval = interval,
-            cumulative_n = interval,
-            cumulative_survivors = cumulative_survivors,
-            cumulative_deaths = cumulative_deaths,
-            decision = current_decision,
-            trial_stopped = current_decision != "Continue"
-          )
-        
-        # Stop if decision reached
-        if(current_decision != "Continue") break
+        all_results <- bind_rows(all_results, results)
       }
-      
-      # Add simulation metadata and combine
-      results <- results %>%
-        mutate(sim_id = sim_id, true_survival_rate = survival_rate)
-      
-      all_results <- bind_rows(all_results, results)
     }
   }
   
   return(all_results)
+}
+
+# Determine when trials stop
+create_stopping_summary <- function(simulation_data) {
+  
+  # Get final results for each simulation
+  final_results <- simulation_data %>%
+    group_by(sim_id, true_survival_rate, recapture_rate) %>%
+    slice_tail(n = 1) %>%  # Get last row for each simulation
+    ungroup()
+  
+  # Stopping time analysis for trials that stopped
+  stopped_trials <- final_results %>%
+    filter(trial_stopped == TRUE) %>%
+    group_by(true_survival_rate, recapture_rate, decision) %>%
+    summarise(
+      n_stopped = n(),
+      median_fish = median(cumulative_n),
+      mean_fish = round(mean(cumulative_n), 1),
+      q25_fish = quantile(cumulative_n, 0.25),
+      q75_fish = quantile(cumulative_n, 0.75),
+      min_fish = min(cumulative_n),
+      max_fish = max(cumulative_n),
+      .groups = "drop"
+    )
+  
+  # Overall trial summary
+  trial_summary <- final_results %>%
+    group_by(true_survival_rate, recapture_rate) %>%
+    summarise(
+      total_trials = n(),
+      n_accept = sum(decision == "Accept H0", na.rm = TRUE),
+      n_reject = sum(decision == "Reject H0", na.rm = TRUE), 
+      n_continue = sum(decision == "Continue", na.rm = TRUE),
+      prop_accept = round(n_accept / total_trials, 3),
+      prop_reject = round(n_reject / total_trials, 3),
+      prop_continue = round(n_continue / total_trials, 3),
+      .groups = "drop"
+    )
+  
+  # Combine results
+  list(
+    stopping_details = stopped_trials,
+    trial_overview = trial_summary
+  )
+}
+
+
+# Determine acceptance and rejection rates for given sample size
+# e.g., when do we stop?
+calculate_cumulative_stopping <- function(simulation_data) {
+  
+  # For each trial, find when it stopped (if it did)
+  stopping_points <- simulation_data %>%
+    filter(trial_stopped == TRUE) %>%
+    select(sim_id, true_survival_rate, recapture_rate, interval, decision)
+  
+  # Create all combinations of intervals and survival/recapture rates
+  all_intervals <- simulation_data %>%
+    distinct(true_survival_rate, recapture_rate) %>%
+    cross_join(tibble(interval = unique(simulation_data$interval))) %>%
+    arrange(true_survival_rate, recapture_rate, interval)
+  
+  # Calculate cumulative stopping proportions
+  cumulative_stats <- all_intervals %>%
+    left_join(stopping_points, by = c("true_survival_rate", "recapture_rate")) %>%
+    group_by(true_survival_rate, recapture_rate, interval.x) %>%
+    summarise(
+      total_trials = n_distinct(simulation_data$sim_id[
+        simulation_data$true_survival_rate == first(true_survival_rate) & 
+          simulation_data$recapture_rate == first(recapture_rate)
+      ]),
+      
+      # Count trials that stopped by this interval
+      n_accept_by_now = sum(decision == "Accept H0" & interval.y <= interval.x, na.rm = TRUE),
+      n_reject_by_now = sum(decision == "Reject H0" & interval.y <= interval.x, na.rm = TRUE),
+      n_stopped_by_now = sum(!is.na(decision) & interval.y <= interval.x, na.rm = TRUE),
+      
+      # Calculate proportions
+      prop_accept_by_now = n_accept_by_now / total_trials,
+      prop_reject_by_now = n_reject_by_now / total_trials,
+      prop_stopped_by_now = n_stopped_by_now / total_trials,
+      prop_continue = 1 - prop_stopped_by_now,
+      
+      .groups = "drop"
+    ) %>%
+    rename(interval = interval.x)
+  
+  return(cumulative_stats)
+}
+
+#Determine how many trials were inconclusive
+create_inconclusiveness_wide <- function(cumulative_data) {
+  
+  max_interval <- max(cumulative_data$interval)
+  
+  wide_table <- cumulative_data %>%
+    filter(interval == max_interval) %>%
+    select(true_survival_rate, recapture_rate, prop_continue) %>%
+    mutate(
+      pct_inconclusive = round(prop_continue * 100, 1),
+      survival_label = paste0(true_survival_rate * 100, "%")
+    ) %>%
+    select(survival_label, recapture_rate, pct_inconclusive) %>%
+    pivot_wider(names_from = recapture_rate, 
+                values_from = pct_inconclusive,
+                names_prefix = "Recapture_") %>%
+    arrange(survival_label)
+  
+  return(wide_table)
 }
 
 #  Plot functions ####
@@ -148,9 +300,6 @@ theme_JN <- function(base_size=10){
       panel.spacing.x = unit(12, "pt")
     ) 
 }
-
-
-#mortality_table dependency is a tibble cereated by create_mortality_table() can be named otherwise
 
 create_decision_plot <- function(mortality_table) {
   # Extract parameters from table
@@ -284,13 +433,15 @@ create_decision_plot <- function(mortality_table) {
 
 create_journey_plot <- function(mortality_table, 
                                 simulation_data, 
-                                survival_rate_to_show = 0.98,
+                                survival_rates_to_show =  c(0.98),
+                                recapture_rate_to_show = 1.0, 
                                 n_journeys = 10,
                                 journey_ids = NULL) {
   
-  # Filter for specific survival rate
+  # Filter for specific survival rate AND recapture rate
   filtered_data <- simulation_data %>%
-    filter(true_survival_rate == survival_rate_to_show)
+    filter(abs(true_survival_rate - survival_rates_to_show) < 1e-10,
+           abs(recapture_rate - recapture_rate_to_show) < 1e-10) 
   
   # Select journeys to show
   if(!is.null(journey_ids)) {
@@ -308,20 +459,206 @@ create_journey_plot <- function(mortality_table,
   
   # Add journey lines and points
   journey_plot <- base_plot +
-    geom_line(data = journey_data, 
-              aes(x = cumulative_n, y = cumulative_deaths, group = sim_id),
-              color = "blue", alpha = 0.7, size = 0.8) +
-    geom_point(data = journey_data, 
-               aes(x = cumulative_n, y = cumulative_deaths, 
-                   color = decision, shape = trial_stopped),
-               size = 2) +
+    # Grey journey lines (unchanged)
+    geom_line(
+      data = journey_data, 
+      aes(x = cumulative_n, y = cumulative_deaths, group = sim_id),
+      color = "grey", alpha = 0.5, size = 0.8
+    ) +
+    # Density-aware points (size = overlap count)
+    geom_count(
+      data = journey_data,
+      aes(
+        x = cumulative_n, 
+        y = cumulative_deaths, 
+        color = decision,
+        size = after_stat(n)  # n is computed by geom_count
+      ),
+      alpha = 0.6,
+    ) +
+    scale_size_continuous(
+      range = c(2, 8),
+    ) +
+    # Color scale (unchanged)
+    scale_color_manual(
+      values = c(
+        "Accept H0" = "darkgreen", 
+        "Reject H0" = "darkred", 
+        "Continue" = "grey50"
+      )
+    ) +
+    {if(length(survival_rates_to_show) > 1) 
+      facet_wrap(~paste("True Survival:", true_survival_rate * 100, "%"), 
+                 scales = "free")} +
+    labs(title = paste0("Sequential Trial simulation (Recapture = ", 
+                        recapture_rate_to_show * 100, "%, n = ", 
+                        length(unique(journey_data$sim_id)), " simulations per scenario)"))
+  return(journey_plot)
+}
+
+
+plot_stopping_distributions <- function(simulation_data) {
+  
+  stopped_data <- simulation_data %>%
+    group_by(sim_id, true_survival_rate, recapture_rate) %>%
+    slice_tail(n = 1) %>%
+    filter(trial_stopped == TRUE) %>%
+    ungroup()
+  
+  ggplot(stopped_data, aes(x = factor(true_survival_rate), y = cumulative_n, fill = decision)) +
+    geom_boxplot(alpha = 0.7) +
+    facet_wrap(~paste("Recapture Rate:", recapture_rate)) +
+    scale_fill_manual(values = c("Accept H0" = "darkgreen", "Reject H0" = "darkred")) +
+    labs(
+      x = "True Survival Rate",
+      y = "Sample Size at Stopping",
+      fill = "Decision",
+      title = "Distribution of Sample Sizes at Trial Stopping"
+    ) +
+    theme_JN()
+}
+
+plot_decision_proportions <- function(simulation_data) {
+  
+  decision_props <- simulation_data %>%
+    group_by(sim_id, true_survival_rate, recapture_rate) %>%
+    slice_tail(n = 1) %>%
+    group_by(true_survival_rate, recapture_rate, decision) %>%
+    summarise(count = n(), .groups = "drop") %>%
+    group_by(true_survival_rate, recapture_rate) %>%
+    mutate(proportion = count / sum(count))
+  
+  ggplot(decision_props, aes(x = true_survival_rate, y = proportion, fill = decision)) +
+    geom_col(position = "stack") +
+    facet_wrap(~paste("Recapture Rate:", recapture_rate)) +
+    scale_fill_manual(values = c("Accept H0" = "darkgreen", 
+                                 "Reject H0" = "darkred", 
+                                 "Continue" = "grey")) +
+    scale_x_continuous(labels = scales::percent_format()) +
+    scale_y_continuous(labels = scales::percent_format()) +
+    labs(
+      x = "True Survival Rate",
+      y = "Proportion of Trials",
+      fill = "Decision"
+    ) +
+    theme_JN()
+}
+
+plot_cumulative_stopping <- function(cumulative_data, 
+                                     survival_filter = NULL, 
+                                     recapture_filter = NULL) {
+  
+  # Apply filters if specified
+  if (!is.null(survival_filter)) {
+    cumulative_data <- cumulative_data %>% 
+      filter(abs(true_survival_rate - survival_filter) < 1e-10)
+  }
+  
+  if (!is.null(recapture_filter)) {
+    cumulative_data <- cumulative_data %>% 
+      filter(abs(recapture_rate - recapture_filter) < 1e-10)
+  }
+  
+  plot_data <- cumulative_data %>%
+    select(true_survival_rate, recapture_rate, interval, 
+           prop_accept_by_now, prop_reject_by_now, prop_continue) %>%
+    pivot_longer(cols = c(prop_accept_by_now, prop_reject_by_now, prop_continue),
+                 names_to = "outcome", 
+                 values_to = "proportion") %>%
+    mutate(
+      outcome = case_when(
+        outcome == "prop_accept_by_now" ~ "Accept H0",
+        outcome == "prop_reject_by_now" ~ "Reject H0", 
+        outcome == "prop_continue" ~ "Continue"
+      ),
+      percentage = proportion * 100
+    )
+  
+  ggplot(plot_data, aes(x = interval, y = percentage, color = outcome)) +
+    geom_point(alpha = 0.7) +
+    geom_smooth(method = "loess", se = FALSE, span = 0.7) +
+    # Only facet if multiple scenarios remain
+    {if(length(unique(cumulative_data$true_survival_rate)) > 1 | 
+        length(unique(cumulative_data$recapture_rate)) > 1) 
+      facet_grid(recapture_rate ~ true_survival_rate, labeller = label_both)} +
     scale_color_manual(values = c("Accept H0" = "darkgreen", 
                                   "Reject H0" = "darkred", 
-                                  "Continue" = "grey50")) +
-    scale_shape_manual(values = c("TRUE" = 16, "FALSE" = 1)) +
-    labs(title = paste0("Sequential Trial Journeys (True Survival = ", 
-                        survival_rate_to_show * 100, "%, n = ", 
-                        length(unique(journey_data$sim_id)), " journeys)"))
+                                  "Continue" = "grey60")) +
+    scale_y_continuous(labels = scales::percent_format(scale = 1), limits = c(0,100), breaks = seq(0,100,10)) +
+    scale_x_continuous(limits = c(100,1000), breaks=seq(100,1000,100))+
+    labs(
+      x = "Sample Interval",
+      y = "Cumulative Proportion (%)",
+      color = "Decision",
+      title = "Cumulative Trial Outcomes by Sample Size"
+    ) +
+    theme_JN() +
+    theme(legend.position = "bottom") +
+    coord_cartesian(clip = "off")
+}
+
+# Rudimentary attempt to animate sequential trials 
+create_animated_journey_plot <- function(mortality_table, 
+                                         simulation_data, 
+                                         survival_rates_to_show = c(0.98),
+                                         recapture_rate_to_show = 1.0,
+                                         n_journeys = 5,
+                                         journey_ids = NULL) {
   
-  return(journey_plot)
+  # Filter and select journeys (same as before)
+  filtered_data <- simulation_data %>%
+    filter(true_survival_rate %in% survival_rates_to_show,
+           abs(recapture_rate - recapture_rate_to_show) < 1e-10)
+  
+  if(!is.null(journey_ids)) {
+    journey_data <- filtered_data %>%
+      filter(sim_id %in% journey_ids)
+  } else {
+    journey_data <- filtered_data %>%
+      group_by(true_survival_rate) %>%
+      filter(sim_id %in% 1:n_journeys) %>%
+      ungroup()
+  }
+  
+  # Create base decision plot
+  base_plot <- create_decision_plot(mortality_table)
+  
+  # Create animated plot
+  animated_plot <- base_plot +
+    geom_line(
+      data = journey_data, 
+      aes(x = cumulative_n, y = cumulative_deaths, group = sim_id),
+      color = "grey", alpha = 0.5, size = 0.8
+    ) +
+    # Density-aware points (size = overlap count)
+    geom_count(
+      data = journey_data,
+      aes(
+        x = cumulative_n, 
+        y = cumulative_deaths, 
+        color = decision,
+        size = after_stat(n)  # n is computed by geom_count
+      ),
+      alpha = 0.6,
+    ) +
+    scale_size_continuous(
+      range = c(2, 8),
+    ) +
+    # Color scale (unchanged)
+    scale_color_manual(
+      values = c(
+        "Accept H0" = "darkgreen", 
+        "Reject H0" = "darkred", 
+        "Continue" = "grey50"
+      )
+    )+
+    {if(length(survival_rates_to_show) > 1) 
+      facet_wrap(~paste("True Survival:", true_survival_rate * 100, "%"))} +
+    # Animation component - reveal along cumulative_n
+    transition_reveal(cumulative_n) +
+    labs(title = "Sequential Trial Journeys Unfolding",
+         subtitle = "Sample Size: {closest_state}") +
+    ease_aes('linear')
+  
+  return(animated_plot)
 }

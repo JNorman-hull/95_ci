@@ -76,6 +76,7 @@ library(tidyverse)
 library(binom)
 library(scales)
 library(plotly)
+library(gganimate)
 #library(ggpubr)
 #library(gt)
 #library(kableExtra)
@@ -85,7 +86,58 @@ source("./functions.R")
 
 ```
 
-# 3. Helper functions
+# 3. Import
+
+Import mortality simulation data generated in previous session.
+
+Current data:
+
+Desired survival: 98%
+Lower bounds acceptance: 96%
+
+Simulation details:
+A true survival rate of 90 - 100% in 1% intervals
+A recapture rate of 90 - 100% in 1% intervals. 
+
+Modify survival probability to account for recapture rate
+
+Method 1: Extrapolation
+Assume that missing fish have the same survival probability as recaptured fish.
+- This method is safe as we do not have sufficient information to assume missing fish are non-random. This assumes lost fish did not experience systematically different turbine/pump passage (e.g., weaker fish more likely to be lost through harms stronger fish don't experience, or, missing fish were stronger and avoided turbine passage/net entry). We cannot measure these traits within the scope of a survival study. We already grade out fish we deem to have weak behavior or injuries which could impair passage.
+
+Instead, we assume that missing fish would've experienced the same survival probability as recaptured fish. This way, our adjusted survival probability is the same, but our confidence is reduced to account for recapture rate. Under proportional assumption, recapture rate doesn't bias survival estimates. It only affects statistical power and trial length. This is actually a strength of the proportional method. No systematic bias, just increased uncertainty.
+
+Worked example
+
+Exposed fish 400
+Recaptured fish 360
+Observed death (recaptured) 7
+Observed survival rate 353/360 = 98.05% (round up to 98.06)
+
+Missing fish 40
+Under proportional assumption, apply our measured survival to entire sample
+
+Estimated total death = 400 x (1 - 0.9806) = 7.78
+Round up to nearest whole fish = 8
+
+Look up mortality table for 400, 8, instead of 400, 7.
+
+- Adjusted = 98.25% [CI: 96.43% - 99.15%]
+- Adjusted = 98% [CI: 96.1% - 98.98%]
+
+We have reduced our confidence by 0.34% to account for recapture loss
+
+Method 2: Maximum Likelihood Estimation
+
+```{r input_import}
+
+mortality_data  <- read.csv("./input/mortality_data_98surv_96lower_step1.csv")
+simulation_results  <- read.csv("./input/simulation_results_98surv_96lower_10recap.csv")
+
+lookup_mortality_data(mortality_data, 400, 8) 
+lookup_mortality_data(mortality_data, 400, 7) 
+
+```
 
 # 4. Fixed-precision Sequential Confidence Interval Testing
 
@@ -143,35 +195,46 @@ For borderline cases, check the threshold against mortality table to establish e
 
 ```{r mortality_table}
 
-mortality_data <- create_mortality_table(
-  max_sample_size = 1000,
-  step_size = 10,
-  lower_threshold = 96,
-  desired_surv = 98,
-  max_mortality_proportion = 1
-)
+# mortality_data <- create_mortality_table(
+#   max_sample_size = 1000,
+#   step_size = 1,
+#   lower_threshold = 96,
+#   desired_surv = 98,
+#   max_mortality_proportion = 0.5
+# )
+
+#using step size of 1 creates mortality table robust to any recapture rate 
 
 #write.csv(mortality_data, "./output/mortality_data.csv", row.names = FALSE)
 
 mortality_sample_plot <- create_decision_plot(mortality_data)
 mortality_sample_plot
 
-ggsave(filename = "./output/mortality.svg", plot = mortality_sample_plot,
-      units="cm",width=14,height=14)
+#ggsave(filename = "./output/mortality.svg", plot = mortality_sample_plot,
+#      units="cm",width=14,height=14)
 
 ```
 
 ```{r plotly, echo=FALSE, eval = FALSE}
 
+# Create reduced step table for interactive plot
+mortality_data2 <- create_mortality_table(
+  max_sample_size = 1000,
+  step_size = 10,
+  lower_threshold = 96,
+  desired_surv = 98,
+  max_mortality_proportion = 0.5
+)
 
-decision_point <- mortality_sample_plot +
-  geom_point(data = mortality_data, 
+mortality_sample_plot2 <- create_decision_plot(mortality_data2)
+
+decision_point <- mortality_sample_plot2 +
+  geom_point(data = mortality_data2, 
              aes(x = sample_size, y = n_mortality, 
                  text = survival_formatted, color = decision),
              alpha = 0, size = 1)
 
 decision_point_plotly <- ggplotly(decision_point, tooltip = "text")
-
 decision_point_plotly
 
 ```
@@ -183,37 +246,116 @@ This demonstrates the practical implications for trial designs.
 
 ```{r}
 
-simulation_results <- simulate_sequential_trial(
-  simulations = 1:1000,
-  max_sample = 1000,
-  true_survival_rates = 0.98,  # 90% to 100% in 1% steps
-  check_intervals = c(100, 200, 300, 400, 500, 600, 700, 800, 900, 1000), 
-  mortality_table = mortality_data
-)
+# execution_time <- system.time(
+#   simulation_results <- simulate_sequential_trial(
+#     simulations = 1:1000,
+#     max_sample = 1000,
+#     true_survival_rates = round(seq(0.90, 1, 0.01), 2),  
+#     check_intervals = c(100, 200, 300, 400, 500, 600, 700, 800, 900, 1000), 
+#     mortality_table = mortality_data,
+#     recapture_rate = round(seq(0.90, 1, 0.01), 2)
+#   )
+# )
+# 
+# print(execution_time)
+# 
+# write.csv(simulation_results, "./output/simulation_results.csv", row.names = FALSE)
+#simulation takes 1765 seconds, ~30 minutes
 
-#write.csv(simulation_results, "./output/simulation_results.csv", row.names = FALSE)
+
+#ggsave(filename = "./output/mortality_journey_97.svg", plot = journey_plot_20,
+ #     units="cm",width=22,height=16)
 
 
-# Plot journeys for 98% survival
-journey_plot_5 <- create_journey_plot(mortality_data, simulation_results, 
-                                      survival_rate_to_show = 0.98, 
-                                      n_journeys = 5)
-journey_plot_5
-journey_plot_20
-# Show 20 journeys
-journey_plot_20 <- create_journey_plot(mortality_data, simulation_results, 
-                                       survival_rate_to_show = 0.98, 
-                                       n_journeys = 500)
+journey_plot_single <- create_journey_plot(mortality_data, simulation_results, 
+                                           survival_rates_to_show = c(0.98),
+                                           recapture_rate_to_show = 1.0,
+                                           n_journeys = 1000)
 
-# Show specific journey IDs
-journey_plot_specific <- create_journey_plot(mortality_data, simulation_results, 
-                                             survival_rate_to_show = 0.98, 
-                                             journey_ids = c(1, 5, 10, 15, 20))
+journey_plot_single + theme(legend.position = "none")
 
+#this allows you to say "if the True survival is >98%, then we will accept by interval 3 (total n = 300) 
 
 
 ```
 
+
+
+```{r eval = FALSE}
+
+anim_plot <- create_animated_journey_plot(mortality_data, simulation_results,
+                                          survival_rates_to_show = c(0.98),
+                                          recapture_rate_to_show = 1.0,
+                                          n_journeys = 3)
+
+# Render animation
+animated_gif <- animate(anim_plot, 
+                       width = 800, height = 600, 
+                       duration = 8,  # 8 seconds total
+                       fps = 30,      # 10 frames per second
+                       renderer = gifski_renderer("journey_animation.gif"))
+
+# Display
+animated_gif
+
+```
+
+
+```{r eval= FALSE}
+
+
+# Generate summaries
+summaries <- create_stopping_summary(simulation_results)
+
+# View stopping details
+summaries$stopping_details
+
+# View trial overview  
+summaries$trial_overview
+
+```
+
+
+```{r eval = FALSE}
+# Determine whether recapture rate influences stopping decisions 
+# may be useless, not sure if I'm measuring the final decision, or proportion of all decision points through trial
+
+decision_prop <- plot_decision_proportions(simulation_results)
+decision_prop
+
+# Determine the sample size at which trials are usually stopped, given by recapture rate and true survival
+stopping_prop <- plot_stopping_distributions(simulation_results)
+stopping_prop
+
+# Visualisation not particularly helpful, should tabulate and measure differences in proportions
+```
+
+
+```{r}
+
+cumulative_data <- calculate_cumulative_stopping(simulation_results)
+
+# View specific scenario
+cumulative_data %>%
+  filter(true_survival_rate == 0.95, recapture_rate == 1.0) %>%
+  select(interval, prop_accept_by_now, prop_reject_by_now, prop_continue) 
+
+
+cumulative_plot <- plot_cumulative_stopping(cumulative_data, 
+                                           survival_filter = 0.98, 
+                                           recapture_filter = 1)
+
+cumulative_plot <- plot_cumulative_stopping(cumulative_data)
+
+
+ggsave(filename = "./output/cumulative_plot.svg", plot = cumulative_plot,
+      units="cm",width=14,height=14)
+
+inconclusiveness_wide <- create_inconclusiveness_wide(cumulative_data)
+print(inconclusiveness_wide)
+
+
+```
 
 ## 4.2 Adjusted CIs
 
