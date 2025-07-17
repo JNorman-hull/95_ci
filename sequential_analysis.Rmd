@@ -134,8 +134,15 @@ Method 2: Maximum Likelihood Estimation
 mortality_data  <- read.csv("./input/mortality_data_98surv_96lower_step1.csv")
 simulation_results  <- read.csv("./input/simulation_results_98surv_96lower_10recap.csv")
 
+# lookup specific rows (sample, mortality)
 lookup_mortality_data(mortality_data, 400, 8) 
 lookup_mortality_data(mortality_data, 400, 7) 
+
+#Create demo dataset
+#demo_mortality <- mortality_data[sample(nrow(mortality_data), 100), ]
+#demo_simulation <- simulation_results[sample(nrow(simulation_results), 100), ]
+#write.csv(demo_mortality, "./output/demo_mortality.csv")
+#write.csv(demo_simulation, "./output/demo_simulation.csv")
 
 ```
 
