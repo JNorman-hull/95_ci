@@ -382,6 +382,52 @@ print(inconclusiveness_wide)
 
 Developed a method to handle recapture rate using the Horvitz–Thompson estimator.
 
+Key assumption of H-T estimator:
+
+The HT estimator is designed for unbiased estimation under unequal probability sampling, which aligns well with:
+
+ - Known recapture rate (i.e., sampling probability for each fish)
+
+ - A known total number of exposed individuals (the finite population correction, FPC)
+ 
+ - The assumption that mortality is independent of recapture (i.e., missingness is random or at least conditionally ignorable). If unrecaptured fish may have higher or lower mortality, then the HT estimator is biased because the missingness is not at random. This is a core limitation: HT assumes known inclusion probabilities and that these are not related to the variable of interest (here, mortality).
+
+In reality, we may violate this assumption, but we have no prior information to reasonably assume this. Therefore, we can only assume that mortality is at random.
+
+However... H-T provides a defensible first-pass estimate, especially if paired with finite population control (we always have this!)
+
+How may we handle the violation?
+
+Effective sensitivity analysis.
+
+The H-T confidence interval says how uncertain we are in the mortality estimate when we have only observed part of the population, assuming recaptured fish are a random sample. The lower bound of the CI reflects the minimum plausible mortality, the upper bound reflects the maximum plausible mortality.
+
+We accept that the CI bounds assume random sampling, but we apply the lower and upper bounds to allow for uncertainty due to incomplete observation. We do not believe there is a strong bias, but want a defensible lower-end estimate.
+
+The CI is derived from normal approximation.
+
+For example:
+
+300 fish exposed
+270 recaptured
+27 deaths observed, observed mortality = 27/270 = 10%
+HT point estimate = 27/270 x 300 = 30 deaths
+HT 95% CI: (26.6, 33.4) = 26.6/300 (8.87% mortality), = 33.4/300 (11.13% mortality)
+
+So, under the assumption that the recaptured fish are representative (e.g., assuming random mortality), the true population mortality rate is likely between 8.9% and 11.1% with 95% confidence.
+
+We do not confidently know mortality is random, so we can infer the lower and upper mortality estimates as potentially representing scenarios where mortality is based in those groups (e.g., lower/higher mortality in missing fish)
+
+What do the bounds potentially imply about missing fish?
+
+Implied death in missing fish:
+
+Lower = 26.6 - 27 = -0.4 (not possible death, so assume 0) e.g., 10% percentage points less mortality than recaptured)
+Upper = 33.4 - 27 = 6.4 = 6.4/30 = 21.3% (e.g., 11.13% percentage points more morality than recaptured)
+
+These lower and upper bounds are therefore inferential of what COULD'VE happened to the fish... more or less may have died in the missing fish!
+
+Under the assumptions of the HT estimator, and based on the confidence interval of total mortality, mortality among unrecaptured fish could plausibly range from near 0% (if all survived) to 21.3% (if 6.4 of 30 died). This reflects the uncertainty due to both sampling variation and the unknown fate of missing fish, but does not account for systematic bias if missingness is not random
 
 ```{r horvitz–hompson_estimator}
 
@@ -703,12 +749,12 @@ sens_plot2
 
 my_decisions <- analyze_real_study_data_enhanced(
   exposed_fish = 300,
-  recaptured_fish = 278, 
-  observed_deaths = 9,
+  recaptured_fish = 270, 
+  observed_deaths = 27,
   mortality_table = mortality_data,
   cumulative_data = cumulative_all,
-  assumed_true_survival = 0.97,
-  recapture_rate_scenario = 0.93 
+  assumed_true_survival = 0.90,
+  recapture_rate_scenario = 0.90 
 )
 
 # show stopping proportions plot
