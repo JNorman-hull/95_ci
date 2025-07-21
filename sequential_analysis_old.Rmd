@@ -1,0 +1,882 @@
+---
+title: "Fixed-Width Sequential Confidence Interval Testing"
+author: "Josh Norman"
+date: "2025-07-08"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 8,
+  fig.height = 6,
+  fig.align = "center"
+)
+knitr::opts_knit$set(root.dir = getwd())
+```
+
+# 1. Introduction
+
+This analysis aims to produce a viable Fixed-Width Sequential Confidence Interval Testing method for designing live fish trials with defined points to accept or reject null hypothesis and continue testing.
+
+```{r test_output, eval = FALSE, include=FALSE}
+
+test <- tibble(
+  sample = 1:10,
+  n_mortality = 1:10
+)
+
+write.csv(test, "./output/test.csv", row.names = FALSE)
+
+```
+
+```{r test_input, eval = FALSE, include=FALSE}
+
+test_data  <- read.csv("./output/test.csv")
+
+# 1. Filter rows where sample == 1
+filter_sample1 <- test_data %>% filter(sample == 1)
+
+# 2. Filter rows where sample == 1 AND n_mortality == 1
+filter_sample1_mort1 <- test_data %>% filter(sample == 1, n_mortality == 1)
+
+# 3. Filter rows where n_mortality != 10
+filter_mort_not10 <- test_data %>% filter(n_mortality != 10)
+
+# 4. Filter rows where sample is in a list (1, 3, 5)
+filter_sample_in <- test_data %>% filter(sample %in% c(1, 3, 5))
+
+# 5. Filter for rows with MAX n_mortality
+filter_max_mort <- test_data %>% filter(n_mortality == max(n_mortality, na.rm = TRUE))
+
+# 6. Filter for rows with MIN sample
+filter_min_sample <- test_data %>% filter(sample == min(sample))
+
+# 7. Filter rows where n_mortality > 5
+filter_mort_gt5 <- test_data %>% filter(n_mortality > 5)
+
+# 8. Filter rows where sample is between 3 and 7 (inclusive)
+filter_sample_between <- test_data %>% filter(between(sample, 3, 7))
+
+# 9. Filter rows with NA in n_mortality
+filter_na_mort <- test_data %>% filter(is.na(n_mortality))
+
+# 10. Filter rows where n_mortality is NOT NA
+filter_non_na_mort <- test_data %>% filter(!is.na(n_mortality))
+
+```
+
+# 2. Required libraries
+
+```{r libraries, echo=FALSE}
+#library(here)
+library(tidyverse)
+library(binom)
+library(scales)
+library(plotly)
+library(gganimate)
+library(survey) 
+#library(ggpubr)
+#library(gt)
+#library(kableExtra)
+
+#Source functions for calculations, plots etc
+source("./functions.R")
+
+```
+
+# 3. Import
+
+Import mortality simulation data generated in previous session.
+
+Current data:
+
+Desired survival: 98%
+Lower bounds acceptance: 96%
+
+Simulation details:
+A true survival rate of 90 - 100% in 1% intervals
+A recapture rate of 90 - 100% in 1% intervals. 
+
+Modify survival probability to account for recapture rate
+
+Method 1: Extrapolation
+Assume that missing fish have the same survival probability as recaptured fish.
+- This method is safe as we do not have sufficient information to assume missing fish are non-random. This assumes lost fish did not experience systematically different turbine/pump passage (e.g., weaker fish more likely to be lost through harms stronger fish don't experience, or, missing fish were stronger and avoided turbine passage/net entry). We cannot measure these traits within the scope of a survival study. We already grade out fish we deem to have weak behavior or injuries which could impair passage.
+
+Instead, we assume that missing fish would've experienced the same survival probability as recaptured fish. This way, our adjusted survival probability is the same, but our confidence is reduced to account for recapture rate. Under proportional assumption, recapture rate doesn't bias survival estimates. It only affects statistical power and trial length. This is actually a strength of the proportional method. No systematic bias, just increased uncertainty.
+
+Worked example
+
+Exposed fish 400
+Recaptured fish 360
+Observed death (recaptured) 7
+Observed survival rate 353/360 = 98.05% (round up to 98.06)
+
+Missing fish 40
+Under proportional assumption, apply our measured survival to entire sample
+
+Estimated total death = 400 x (1 - 0.9806) = 7.78
+Round up to nearest whole fish = 8
+
+Look up mortality table for 400, 8, instead of 400, 7.
+
+- Adjusted = 98.25% [CI: 96.43% - 99.15%]
+- Adjusted = 98% [CI: 96.1% - 98.98%]
+
+We have reduced our confidence by 0.34% to account for recapture loss
+
+Method 2: Maximum Likelihood Estimation
+
+```{r input_import}
+
+mortality_data  <- read.csv("./input/mortality_data_98surv_96lower_step1.csv")
+ht_simulation_results  <- read.csv("./input/ht_simulation_results.csv")
+
+# lookup specific rows (sample, mortality)
+lookup_mortality_data(mortality_data, 400, 7) 
+lookup_mortality_data(mortality_data, 360, 7) 
+
+#Create demo dataset
+#demo_mortality <- mortality_data[sample(nrow(mortality_data), 100), ]
+#demo_simulation <- simulation_results[sample(nrow(simulation_results), 100), ]
+#write.csv(demo_mortality, "./output/demo_mortality.csv")
+#write.csv(demo_simulation, "./output/demo_simulation.csv")
+
+```
+
+# 4. Fixed-precision Sequential Confidence Interval Testing
+
+Fixed-width sequential confidence interval testing is a statistical method used to estimate a parameter (e.g., mean, proportion) with a predetermined precision while dynamically adjusting the sample size based on accumulating data. Unlike fixed-sample designs, this approach continuously monitors the width of the confidence interval (CI) during data collection, stopping only once the CI narrows to a pre-specified fixed width, ensuring the estimate meets the desired margin of error. Sequential testing is particularly useful when data collection is costly or time-consuming, as it often requires fewer observations than fixed-sample methods while maintaining statistical validity.
+
+We deviate from this principle by fixing our precision level as apposed to the width of the CI.
+
+## 4.1 Unadjusted CIs
+
+Ensure we calculate our confidence intervals based on the survival probability, NOT, the mortality probability. This may be a source of error for the previous differences in calculations. 
+
+At each sampling point (e.g., every n = 100), calculate Wilson confidence intervals for observed mortality number. This will inherently deviate from fixed-width CI as the CI width is determined by observed mortality and sample size.
+
+Decision rules to estimate probability with a given precision level (differs from hypothesis based testing):
+
+-   Desired threshold for survival ≥ 98%
+
+-   Not fish-friendly : If upper 95% CI \< 98%
+
+-   Fish-friendly: If observed survival ≥ 98% and lower 95% CI ≥ 94%
+
+-   Continue testing: Otherwise
+
+The continue zone therefore directly controls the estimation error and we do not apply traditional hypothesis based testing.\
+\
+**Accepting only when results are clear and conservative (\>98% + LB ≥ 94%). Rejecting only when results are definitively bad (UB \< 98%). Continuing otherwise—no gray-area decisions.**
+
+**Type I/II Error Control**
+
+-   **Type I Error (False "Accept"):**
+
+    -   Controlled by requiring **LB ≥ 94% AND observed \> 98%**.
+
+    -   This is stricter than classic hypothesis tests (reduces false positives).
+
+-   **Type II Error (False "Reject"):**
+
+    -   Controlled by **only rejecting if UB \< 98%** (avoids premature rejection)
+
+**Conservatism**
+
+-   Sequential testing is required in our application as we do not have sufficient knowledge of the actual mortality rate to apply a fixed sample size. 
+
+-   Our first sample occurs at 100, which has already significantly reduced our likelihood of committing a type I error. We simple maintain our artificial alpha spend linearly throughout the experiment. Bare in mind there is no true alpha when we are just examining within group probability and want a fixed precision. That will come in the next approach of comparing impact to control groups.
+
+-   The criteria for rejecting the null are already high by requiring an upper bounds to not include 98.
+
+-   Fixed lower bound rule is a conservative measure to guarantee fixed estimation lower bounds.
+
+Because this restriction is already conservative, we choose not to apply any further adjustment to the confidence intervals.
+
+#### 4.1.1 Build mortality table
+
+For borderline cases, check the threshold against mortality table to establish exact criteria 
+
+```{r mortality_table}
+
+# mortality_data <- create_mortality_table(
+#   max_sample_size = 1000,
+#   step_size = 1,
+#   lower_threshold = 96,
+#   desired_surv = 98,
+#   max_mortality_proportion = 0.5
+# )
+
+#using step size of 1 creates mortality table robust to any recapture rate 
+
+#write.csv(mortality_data, "./output/mortality_data.csv", row.names = FALSE)
+
+mortality_sample_plot <- create_decision_plot(mortality_data)
+mortality_sample_plot
+
+#ggsave(filename = "./output/mortality.svg", plot = mortality_sample_plot,
+#      units="cm",width=14,height=14)
+
+```
+
+```{r plotly, echo=FALSE, eval = FALSE}
+
+# Create reduced step table for interactive plot
+mortality_data2 <- create_mortality_table(
+  max_sample_size = 1000,
+  step_size = 10,
+  lower_threshold = 96,
+  desired_surv = 98,
+  max_mortality_proportion = 0.5
+)
+
+mortality_sample_plot2 <- create_decision_plot(mortality_data2)
+
+decision_point <- mortality_sample_plot2 +
+  geom_point(data = mortality_data2, 
+             aes(x = sample_size, y = n_mortality, 
+                 text = survival_formatted, color = decision),
+             alpha = 0, size = 1)
+
+decision_point_plotly <- ggplotly(decision_point, tooltip = "text")
+decision_point_plotly
+#make thsi display in a pop out browser window by default 
+
+```
+
+### 4.1.2 Simulating sequntial choice scenarios
+
+We must validate our approach to sequentially testing survival under different true mortality scenarios.
+This demonstrates the practical implications for trial designs.
+
+```{r}
+
+# Original simulation without proper Horvitz–Thompson estimator
+
+# execution_time <- system.time(
+#   simulation_results <- simulate_sequential_trial(
+#     simulations = 1:1000,
+#     max_sample = 1000,
+#     true_survival_rates = round(seq(0.90, 1, 0.01), 2),
+#     check_intervals = c(100, 200, 300, 400, 500, 600, 700, 800, 900, 1000),
+#     mortality_table = mortality_data,
+#     recapture_rate = round(seq(0.90, 1, 0.01), 2)
+#   )
+# )
+# 
+# print(execution_time)
+# 
+# write.csv(simulation_results, "./output/simulation_results.csv", row.names = FALSE)
+#simulation takes 1765 seconds, ~30 minutes
+
+
+#ggsave(filename = "./output/mortality_journey_97.svg", plot = journey_plot_20,
+ #     units="cm",width=22,height=16)
+
+
+```
+
+```{r}
+
+journey_plot_single <- create_journey_plot(mortality_data, simulation_results, 
+                                           survival_rates_to_show = c(0.98),
+                                           recapture_rate_to_show = 1.0,
+                                           n_journeys = 1000)
+
+journey_plot_single + theme(legend.position = "none")
+
+#this allows you to say "if the True survival is >98%, then we will accept by interval 3 (total n = 300) 
+
+
+```
+
+
+```{r eval = FALSE}
+
+anim_plot <- create_animated_journey_plot(mortality_data, simulation_results,
+                                          survival_rates_to_show = c(0.98),
+                                          recapture_rate_to_show = 1.0,
+                                          n_journeys = 3)
+
+# Render animation
+animated_gif <- animate(anim_plot, 
+                       width = 800, height = 600, 
+                       duration = 8,  # 8 seconds total
+                       fps = 30,      # 10 frames per second
+                       renderer = gifski_renderer("journey_animation.gif"))
+
+# Display
+animated_gif
+
+```
+
+
+```{r eval= FALSE}
+
+#Origional stopping summaries without proper Horvitz–Thompson estimator
+
+# Generate summaries
+summaries <- create_stopping_summary(simulation_results)
+
+# View stopping details
+summaries$stopping_details
+
+# View trial overview  
+summaries$trial_overview
+
+```
+
+
+```{r eval = FALSE}
+#Don't think this is much use as it doesn't use proper Horvitz–Thompson estimator
+
+# Determine whether recapture rate influences stopping decisions 
+# may be useless, not sure if I'm measuring the final decision, or proportion of all decision points through trial
+
+decision_prop <- plot_decision_proportions(simulation_results)
+decision_prop
+
+# Determine the sample size at which trials are usually stopped, given by recapture rate and true survival
+stopping_prop <- plot_stopping_distributions(simulation_results)
+stopping_prop
+
+# Visualisation not particularly helpful, should tabulate and measure differences in proportions
+```
+
+
+```{r, eval = FALSE}
+
+#Original stopping but without Horvitz–Thompson estimator
+
+cumulative_data <- calculate_cumulative_stopping(simulation_results)
+
+# View specific scenario
+cumulative_data %>%
+  filter(true_survival_rate == 0.95, recapture_rate == 1.0) %>%
+  select(interval, prop_accept_by_now, prop_reject_by_now, prop_continue) 
+
+
+cumulative_plot <- plot_cumulative_stopping(cumulative_data, 
+                                           survival_filter = 0.98, 
+                                           recapture_filter = 1)
+
+cumulative_plot <- plot_cumulative_stopping(cumulative_data)
+
+
+ggsave(filename = "./output/cumulative_plot.svg", plot = cumulative_plot,
+      units="cm",width=14,height=14)
+
+inconclusiveness_wide <- create_inconclusiveness_wide(cumulative_data)
+print(inconclusiveness_wide)
+
+
+```
+
+
+
+### NEW ANALYSIS ###
+
+Developed a method to handle recapture rate using the Horvitz–Thompson estimator.
+
+Key assumption of H-T estimator:
+
+The HT estimator is designed for unbiased estimation under unequal probability sampling, which aligns well with:
+
+ - Known recapture rate (i.e., sampling probability for each fish)
+
+ - A known total number of exposed individuals (the finite population correction, FPC)
+ 
+ - The assumption that mortality is independent of recapture (i.e., missingness is random or at least conditionally ignorable). If unrecaptured fish may have higher or lower mortality, then the HT estimator is biased because the missingness is not at random. This is a core limitation: HT assumes known inclusion probabilities and that these are not related to the variable of interest (here, mortality).
+
+In reality, we may violate this assumption, but we have no prior information to reasonably assume this. Therefore, we can only assume that mortality is at random.
+
+However... H-T provides a defensible first-pass estimate, especially if paired with finite population control (we always have this!)
+
+How may we handle the violation?
+
+Effective sensitivity analysis.
+
+The H-T confidence interval says how uncertain we are in the mortality estimate when we have only observed part of the population, assuming recaptured fish are a random sample. The lower bound of the CI reflects the minimum plausible mortality, the upper bound reflects the maximum plausible mortality.
+
+We accept that the CI bounds assume random sampling, but we apply the lower and upper bounds to allow for uncertainty due to incomplete observation. We do not believe there is a strong bias, but want a defensible lower-end estimate.
+
+The CI is derived from normal approximation.
+
+For example:
+
+300 fish exposed
+270 recaptured
+27 deaths observed, observed mortality = 27/270 = 10%
+HT point estimate = 27/270 x 300 = 30 deaths
+HT 95% CI: (26.6, 33.4) = 26.6/300 (8.87% mortality), = 33.4/300 (11.13% mortality)
+
+So, under the assumption that the recaptured fish are representative (e.g., assuming random mortality), the true population mortality rate is likely between 8.9% and 11.1% with 95% confidence.
+
+We do not confidently know mortality is random, so we can infer the lower and upper mortality estimates as potentially representing scenarios where mortality is based in those groups (e.g., lower/higher mortality in missing fish)
+
+What do the bounds potentially imply about missing fish?
+
+Implied death in missing fish:
+
+Lower = 26.6 - 27 = -0.4 (not possible death, so assume 0) e.g., 10% percentage points less mortality than recaptured)
+Upper = 33.4 - 27 = 6.4 = 6.4/30 = 21.3% (e.g., 11.13% percentage points more morality than recaptured)
+
+These lower and upper bounds are therefore inferential of what COULD'VE happened to the fish... more or less may have died in the missing fish!
+
+Under the assumptions of the HT estimator, and based on the confidence interval of total mortality, mortality among unrecaptured fish could plausibly range from near 0% (if all survived) to 21.3% (if 6.4 of 30 died). This reflects the uncertainty due to both sampling variation and the unknown fate of missing fish, but does not account for systematic bias if missingness is not random
+
+```{r horvitz–hompson_estimator}
+
+# Simulate sequential trial decisions using Horvitz–Thompson estimator.
+# Three levels of estimation
+# aggressive = accept earlier (lowest death estimate mortality lower in missing fish)
+# conservative = reject earlier (highest death estimate mortality higher in missing fish)
+# neutral = marginal inflation of lower bounds (mortality assumed equal in missing fish)
+
+# execution_time <- system.time(
+#   ht_simulation_results <- run_ht_all_scenarios(
+#     simulations = 1:1000,
+#     max_sample = 1000,
+#     true_survival_rates = round(seq(0.90, 1, 0.01), 2),
+#     check_intervals = c(100, 200, 300, 400, 500, 600, 700, 800, 900, 1000),
+#     mortality_table = mortality_data,
+#     recapture_rates = round(seq(0.90, 1, 0.01), 2)
+#   )
+# )
+# 
+# print(execution_time)
+
+# Takes ~ 2 hours
+
+#write.csv(ht_simulation_results, "./output/ht_simulation_results.csv")
+
+# Quick fix as previous simulation incorrectly mismatched cumulative_deaths to ht_deaths_point for all methods
+# Now changed in function if simulation re-run again
+ht_simulation_results <- ht_simulation_results %>%
+  mutate(
+    # Replace cumulative_deaths with the actual decision estimate
+    cumulative_deaths = case_when(
+      decision_method == "aggressive" ~ ht_deaths_ci_lower,
+      decision_method == "conservative" ~ ht_deaths_ci_upper,
+      decision_method == "neutral" ~ ht_deaths_point,
+      TRUE ~ cumulative_deaths  # fallback
+    ),
+    # Also fix cumulative_survivors accordingly
+    cumulative_survivors = cumulative_n - cumulative_deaths
+  )
+
+```
+
+Using the simulation output, we can now determine what scenarios are most likely to occur during sequential testing
+
+```{r}
+
+# Plot simulations for 90 - 100% survival, 90% and 100% recapture using the neutral method. Mortality in missing fish assumed to be random (like observed fish)
+
+journey_plot_recapture <- create_journey_plot_ht_comprehensive(
+  mortality_data,
+  ht_simulation_results_fixed,
+  survival_rates_to_show = c(0.90, 0.91, 0.92, 0.93, 0.94, 0.95, 0.96, 0.97, 0.98, 0.99,  1),
+    recapture_rates_to_show = c(0.9, 1.0),
+  decision_methods_to_show = c("neutral"),
+  n_journeys = 1000
+)
+
+journey_plot_recapture$layers <- journey_plot_recapture$layers[
+  !sapply(journey_plot_recapture$layers, function(x) inherits(x$geom, "GeomText"))
+]
+
+journey_plot_recapture
+
+```
+
+
+```{r}
+
+# Plot simulations for specific survival and recapture rate, three mortality estimates
+
+journey_plot_recap_method <- create_journey_plot_ht_comprehensive(
+  mortality_data,
+  ht_simulation_results_fixed,
+  survival_rates_to_show = c( 0.98),
+    recapture_rates_to_show = c(0.93),
+  decision_methods_to_show = c("neutral", "aggressive", "conservative"),
+  n_journeys = 1000
+)
+
+journey_plot_recap_method$layers <- journey_plot_recap_method$layers[
+  !sapply(journey_plot_recap_method$layers, function(x) inherits(x$geom, "GeomText"))
+]
+
+journey_plot_recap_method
+
+```
+
+Now, we need to understand when we are most likely to stop, at a given sample interval, for a given true survival rate and recapture 
+
+
+```{r}
+
+ht_neutral <- ht_simulation_results %>% 
+  filter(decision_method == "neutral")
+
+ht_aggressive<- ht_simulation_results %>% 
+  filter(decision_method == "aggressive")
+
+ht_conservative <- ht_simulation_results %>% 
+  filter(decision_method == "conservative")
+
+cumulative_data_neutral <- calculate_cumulative_stopping(ht_neutral)
+cumulative_data_conservative<- calculate_cumulative_stopping(ht_conservative)
+cumulative_data_aggressive<- calculate_cumulative_stopping(ht_aggressive)
+
+# Combine and add method labels
+cumulative_all <- bind_rows(
+  cumulative_data_aggressive %>% mutate(decision_method = "aggressive"),
+  cumulative_data_neutral %>% mutate(decision_method = "neutral"),
+  cumulative_data_conservative %>% mutate(decision_method = "conservative")
+)
+
+#write.csv(cumulative_all, "./output/cumulative_all.csv")
+
+```
+
+```{r}
+
+#Specific example of stopping point for a given scenario 
+# Lookup from cumulative table
+
+stopping_93_recap <- cumulative_all %>%
+  filter(
+    true_survival_rate == 0.98,
+    recapture_rate == 0.93,
+    decision_method == "neutral"
+  ) %>%
+  select(
+    interval,
+    prop_accept_by_now,
+    prop_reject_by_now,
+    prop_continue,
+    prop_stopped_by_now
+  )
+
+# We can also examine stopping power by our recapture error method choice 
+stopping_93_recap_method <- cumulative_all %>%
+  filter(
+    true_survival_rate == 0.98,
+    recapture_rate == 0.93
+  ) %>%
+  select(interval, decision_method, prop_stopped_by_now)
+
+# Pivot to wide format for easy comparison
+stopping_93_recap_method <- stopping_93_recap_method %>%
+  pivot_wider(names_from = decision_method, values_from = prop_stopped_by_now)
+
+```
+
+We can now visualise our stopping decisions to provide a visual reference for when continuing sampling is a worthy trade-off
+
+```{r}
+
+# Plot all survival and recapture conditions as a facet matrix 
+
+plot_cumulative_stopping(cumulative_all, 
+                         decision_method_filter = "neutral")
+
+#decision_method_filter = "conservative"
+#decision_method_filter = "aggressive"
+
+```
+
+```{r}
+
+#Plot specific scenario showing difference across recapture method
+stopping_plot <- plot_cumulative_stopping(cumulative_all,
+                                          survival_filter = 0.98, 
+                                          recapture_filter = 0.93)
+stopping_plot
+
+```
+Now we should determine the influence of our recapture rate on type I and II error
+
+```{r}
+# From this, we can examine the influence of our recapture estimate on type I and type II error rates
+
+#Examine acceptance rate across all
+
+cumulative_plot <- ggplot(cumulative_all, 
+                         aes(x = interval, y = prop_accept_by_now, 
+                             color = decision_method, linetype = decision_method)) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+  scale_color_manual(values = c("aggressive" = "blue", "neutral" = "black", "conservative" = "red")) +
+  scale_y_continuous(labels = scales::percent_format()) +
+  scale_x_continuous(breaks = c(100, 200, 300, 400, 500, 600, 700, 800, 900, 1000)) +
+  labs(
+    title = "Cumulative Acceptance Rate by Sample Interval and Decision Method",
+    x = "Sample Interval",
+    y = "Cumulative Proportion Accepting H0",
+    color = "Decision Method",
+    linetype = "Decision Method"
+  ) +
+  theme_JN() +
+  facet_grid(recapture_rate ~ true_survival_rate, 
+             labeller = labeller(recapture_rate = function(x) paste("Recapture:", x),
+                               true_survival_rate = function(x) paste("Survival:", x)))
+
+cumulative_plot
+
+
+```
+
+```{r}
+
+#Examine acceptance rate across all methods for specific survival and recapture
+
+cumulative_plot_9398 <- cumulative_all %>% 
+  filter(true_survival_rate == 0.98, recapture_rate == 0.93) %>%
+  select(decision_method, interval, prop_accept_by_now, prop_reject_by_now, prop_continue) %>%
+  pivot_longer(cols = c(prop_accept_by_now, prop_reject_by_now, prop_continue),
+               names_to = "outcome", 
+               values_to = "proportion") %>%
+  mutate(
+    outcome = case_when(
+      outcome == "prop_accept_by_now" ~ "Accept H0",
+      outcome == "prop_reject_by_now" ~ "Reject H0", 
+      outcome == "prop_continue" ~ "Continue"
+    )
+  ) %>%
+  ggplot(aes(x = interval, y = proportion, 
+             color = decision_method, linetype = decision_method)) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+  scale_color_manual(values = c("aggressive" = "blue", "neutral" = "black", "conservative" = "red")) +
+  scale_y_continuous(labels = scales::percent_format()) +
+  scale_x_continuous(breaks = c(100, 200, 300, 400, 500, 600, 700, 800, 900, 1000)) +
+  labs(
+    title = "Cumulative Trial Outcomes by Sample Interval (98% Survival, 93% Recapture)",
+    x = "Sample Interval",
+    y = "Cumulative Proportion",
+    color = "Decision Method",
+    linetype = "Decision Method"
+  ) +
+  theme_JN() +
+  theme(legend.position = "bottom") +
+  facet_wrap(~outcome, scales = "free_y")
+
+cumulative_plot_9398
+
+
+```
+
+We may then consider two things (1) Where the 'grey zone' exists when we reject null hypothesis and it may actually be true (e.g., the level of acceptance in 0.94 - 0.97). This is our type I error rate, which increase when trying to estimate close to thresholds.
+(2) how we can control type I error if we use neutral method as it influences acceptance the least.
+
+```{r}
+
+ht_summary <- create_stopping_summary_ht(ht_simulation_results)
+
+# Show how decision method affects outcomes across recapture rates
+sensitivity_data <- ht_summary$trial_overview %>%
+  select(true_survival_rate, recapture_rate, decision_method, prop_accept, prop_continue)
+
+sens_plot <- ggplot(sensitivity_data, aes(x = recapture_rate, y = prop_accept, 
+                            color = decision_method, linetype = decision_method)) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+  scale_color_manual(values = c("aggressive" = "blue", "neutral" = "black", "conservative" = "red")) +
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(
+    title = "Acceptance Rate by Recapture Rate and Decision Method (98% survival)",
+    x = "Recapture Rate",
+    y = "Proportion Accepting H0",
+    color = "Decision Method",
+    linetype = "Decision Method"
+  ) +
+  theme_JN() +
+  facet_wrap(~true_survival_rate)
+
+sens_plot
+
+```
+
+
+```{r}
+
+# For a specific example e.g., 98% true survival
+
+sens_plot2 <- ggplot(sensitivity_data %>%
+                       filter(true_survival_rate == 0.98), aes(x = recapture_rate, y = prop_accept, 
+                            color = decision_method, linetype = decision_method)) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+  scale_color_manual(values = c("aggressive" = "blue", "neutral" = "black", "conservative" = "red")) +
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(
+    title = "Acceptance Rate by Recapture Rate and Decision Method (98% survival)",
+    x = "Recapture Rate",
+    y = "Proportion Accepting H0",
+    color = "Decision Method",
+    linetype = "Decision Method"
+  ) +
+  theme_JN()
+
+sens_plot2
+
+
+# We can see that the effect is worst when recapture rate is lower - it reflects our real world confidence!
+
+```
+
+
+
+
+
+```{r}
+
+# Plot a specific simulation scenario when working live
+# e.g.,  assumed true survival is 95% at interval 300, what do sequential test routes to rejecting null hypothesis this look like? 
+# At 300 fish 
+# We have a cumulative re-catch of 278 (22 missing fish)
+# We have observed 7 dead fish 
+
+# Survival probability of recaptured fish
+#271/278 = 97.48%
+# Recapture rate
+#278/300 = 92.7%
+# These show which lookup conditions to input for the simulation
+
+#We then measure mortality with 3 methods and perform sensitivity analysis
+#Run with defaults first, then can input the assumed_true_survival (0.98) and recapture_rate_scenario (1) afterwards
+
+my_decisions <- analyze_real_study_data_enhanced(
+  exposed_fish = 300,
+  recaptured_fish = 270, 
+  observed_deaths = 27,
+  mortality_table = mortality_data,
+  cumulative_data = cumulative_all,
+  assumed_true_survival = 0.90,
+  recapture_rate_scenario = 0.90 
+)
+
+# show stopping proportions plot
+# show simulated trials plot
+# show sensitivity analysis plot
+
+```
+
+
+
+
+
+```{r}
+#Misc, not sure what to do with yet
+
+stopping_summary1 <- create_stopping_summary_ht(ht_neutral)
+stopping_summary2 <- create_stopping_summary_ht(ht_conservative)
+stopping_summary3 <- create_stopping_summary_ht(ht_aggressive)
+
+
+manuscript_summary <- comparison_summary %>%
+  select(method, prop_accept, prop_reject, prop_continue) %>%
+  mutate(
+    prop_accept = paste0(round(prop_accept * 100, 1), "%"),
+    prop_reject = paste0(round(prop_reject * 100, 1), "%"),
+    prop_continue = paste0(round(prop_continue * 100, 1), "%")
+  ) %>%
+  rename(
+    Method = method,
+    `Accept H0` = prop_accept,
+    `Reject H0` = prop_reject,
+    `Continue` = prop_continue
+  )
+
+print("Trial outcome summary (98% survival, 90% recapture):")
+print(manuscript_summary)
+
+# Plot cumulative acceptance by interval
+
+cumulative_table <- cumulative_all %>%
+  select(true_survival_rate, recapture_rate, decision_method, interval, prop_accept_by_now) %>%
+  mutate(prop_accept_pct = round(prop_accept_by_now * 100, 1)) %>%
+  group_by(true_survival_rate, recapture_rate, interval, decision_method) %>%
+  summarise(prop_accept_pct = first(prop_accept_pct), .groups = "drop") %>%
+  pivot_wider(names_from = decision_method, 
+              values_from = prop_accept_pct,
+              names_prefix = "accept_") %>%
+  arrange(true_survival_rate, recapture_rate, interval)
+
+# Display table for key scenarios
+cat("Cumulative Acceptance Rates (%) by Sample Interval\n")
+
+# Show table for 98% survival, 100% recapture
+key_scenario <- cumulative_table %>%
+  filter(true_survival_rate == 0.98, recapture_rate == 1.0) %>%
+  select(interval, accept_aggressive, accept_neutral, accept_conservative)
+
+cat("98% True Survival, 100% Recapture:\n")
+print(key_scenario)
+
+# Show table for 98% survival, 90% recapture  
+key_scenario_90 <- cumulative_table %>%
+  filter(true_survival_rate == 0.98, recapture_rate == 0.9) %>%
+  select(interval, accept_aggressive, accept_neutral, accept_conservative)
+
+cat("\n98% True Survival, 90% Recapture:\n")
+print(key_scenario_90)
+
+```
+
+## 4.2 Adjusted CIs
+
+Alternatively, we could do Group-Sequential Design with Error-Spending
+
+We could use O'Brien-Fleming alpha spending curve IF we are willing to accept a wider confidence interval but want to prevent early acceptance which only represents random probability in the population e.g., you may need a sample size bigger than your first stop point if the effect is small. Pocock could be a useful method if we want to be more conservative towards rejection, as it is sensitive for extreme cases (0, 1), but requires increasing confidence to reject the null hypothesis e.g., saying a pump isn't fish-friendly, will require slightly more evidence
+
+# 5 Control group comparison
+
+When mortality is rare (e.g., 2%), the absolute survival rate tells you that it's high, but not whether the system caused harm.
+
+Example:
+Pump group: 98% survival (2% mortality)
+
+Is that 2% due to the pump? Or would we have seen it anyway?
+
+Without a control group (e.g., fish handled but not pumped), you can't tell if:
+
+That 2% is normal background mortality (e.g., stress, capture)
+
+Or whether the pump adds additional risk
+
+When mortality occurs and we want to be certain the mortality would not occur if fish were not exposed to the pump, then we require statistical comparisons to a control group population.
+
+Unbalanced study design as large control group for small effect sizes undesired
+
+Use a ratio of 3:1 or 4:1 (justified by literature)
+
+test options
+
+z-test proportions
+fishers exact (where control mortality is 0)
+GLMM (where mixed effects are desired)
+
+
+Use power of x, alpha of x and effect of x
+
+User can change these as desired
+
+Do a one-sided test as only looking to see if mortality in the control group is different to mortality in the impact group
+
+Pick the correct test for this type of data
+
+then build a SPRT were we determine likelihood of a significant test result to make decisions whilst testing fish
+
+Have correction in this for type 1 and 2 error
+
+Then simulate scenarios
+
+Do you always need high precision within group if we are also measuring comparison to control?
