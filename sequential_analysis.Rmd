@@ -720,32 +720,59 @@ ggsave(filename="sens_plot2.svg", plot=sens_plot2,
 ```
 
 
+#Need function for finding minimum sample size for given proportion and confidence interval estimate 
+
 # 3. Hypothese testing
 
 ## 3.1 Compliance testing
 
+Scenario: Observed 100% survival
+          Observed 99% survival
+          Observed 97% survival
+          Observed 96% survival
+          
+Objective: Does pump meet regulatory threshold (≥98%)?
+
+An Exact Binomial test can be applied to determine if an observed survival rate is significantly higher (greater) or lower (less) than a given compliance threshold (p = 0.98).The test can be applied where observed survival is 99% or 100% and statistical evidence to support the survival estimate is desired without a control group. When survival is marginally compliant, or non-compliant, the test may be applied but statistical comparison to a control group is preferred in these scenarios.
+
+Excessively large sample sizes will be required to show 99% is > 98%, and 97% < 98%. This is unethical, and should therefore use confidence interval estimation and/or inferiority (impact survival < control survival) or superiority (impact mortality > control mortality) testing.
+
 ### 3.1.1 Test
 
-```{r}
+```{r compliance_test, eval= FALSE}
 
-#Exact binomial test for superiority/compliance testing
+#Superiority approach
 
-# Example data: 492 survivors out of 500
+# Example data: 100% survival at minimum sample size of 188 where 95% CI = 98.4% - 100%.
 binom.test(x = 188, n = 188, p = 0.98, alternative = "greater")
+#p = 0.02241
 
-# Example data: 11700 survivors out of 12000
-binom.test(x = 410, n = 424, p = 0.98, alternative = "less")
+# Example data: 99% survival at minimum sample size of 200 where 95% CI = 96.43% - 99.73%.
+binom.test(x = 198, n = 200, p = 0.98, alternative = "greater")
+#p = 0.2351
+#See power analysis below for required sample size to show 99% exceeds 98% compliance
 
+#Inferiority approach
+
+# Example data: 96% survival at minimum sample size of 200 where 95% CI = 92.31% - 97.96%
+binom.test(x = 192, n = 200, p = 0.98, alternative = "less")
+#p = 0.04934
+
+# Example data: 97% survival at minimum sample size of 600 where 95% CI = 95.31 - 98.09%
+binom.test(x = 582, n = 600, p = 0.98, alternative = "less")
+#p = 0.06104
+#See power analysis below for required sample size to show 97% does not meet 98% compliance
+
+# check what this power measurement is doing and decide whether to include it
 # Power when true survival = 99%
-power <- 1 - pbinom(982, 1000, 0.97) 
-power
+# power <- 1 - pbinom(957, 969, 0.99) 
+# power
 
 ```
 
 ### 3.1.2 Power
 
-```{r}
-
+```{r compliance_power, eval = FALSE}
 
 result_greater <- find_compliance_sample_size(
   true_rate = 0.99, 
@@ -753,489 +780,422 @@ result_greater <- find_compliance_sample_size(
   target_power = 0.8
 )
 print(result_greater)
+# Sample size of at least 969 required to observe an exact 99% survival that statistically exceeds 98%
+# Reject (compliance ≤  0.98 ) if ≥  957 / 969  survivors
+# Example data: 99% survival at minimum sample size of 200 where 95% CI = 96.43% - 99.73%.
+# binom.test(x = 957, n = 969, p = 0.98, alternative = "greater")
+# p = 0.04973
 
 result_less <- find_compliance_sample_size(
-  true_rate = 0.96, 
+  true_rate = 0.97, 
   test_direction = "less", 
   target_power = 0.8
 )
 print(result_less)
-
+# Sample size of at least 1469 required to observe an exact 97% survival that statistically does not meet 98%
+# Reject (compliance ≥  0.98 ) if ≤  1430 / 1469  survivors
+# Example data: 97% survival at minimum sample size of 600 where 95% CI = 95.31 - 98.09%
+# binom.test(x = 1430, n = 1469, p = 0.98, alternative = "less")
+# p = 0.04931
 
 ```
 
 
-## 3.2 Non-inferiority testing
+What about when we observe 98% survival?
+
+Exact binomial test for compliance cannot be applied when observed survival = 98%. Instead, we rely on CI estimation, and can also make interpretation from comparisons with a control group.
+
+Group comparison test directional considerations
+  - Two-sided: Is there any statistical difference between pump and control?
+  - One-sided (less): Is pump survival inferior to control survival?
+      matrix(c(impact_surv, impact_died, control_surv, control_died), nrow=2, byrow=T)
+      fisher.test(matrix, alternative = "less")
+  - One-sided (greater): Is control survival superior to impact survival?
+      matrix(c(control_surv, control_died, impact_surv, impact_died), nrow=2, byrow=T)
+      fisher.test(matrix, alternative = "greater")
+  - Use a survival-first matrix. It is critical the first row of the matrix represents the direction of compliance
+  e.g., impact first = alternative tests against control
+  
+For consistency, there is no need to consider reversing the matrix and asking if control is superior. We should always determine whether pump survival is inferior. If the two observed proportions are close (e.g., 94% impact, 95% control), we can switch to a TOST.
+  
+To examine the question of 'Is pump acceptable despite meeting threshold exactly?', we can take a difference or inferiority test approach. The same approach will also be followed for determining test choice where we ask 'Does the pump cause harm?'
+
+## 3.2 Difference testing
 
 ### 3.2.1 Test
 
+- Two-sided: Is there any statistical difference between pump and control?
 
-```{r}
-#non-inferiority testing
+Scenario: Observed 98% survival
+          Observed ≤ 97% survival
 
-control_survivors <- 64
-control_deaths <- 17
-control_total <- 81
-control_prop <- control_survivors / control_total
+Objective: Is there any difference between pump and control?
 
-# Non-inferiority margin: 2% (pump acceptable if ≥97%)
-ni_margin <- 0.02
-ni_threshold <- control_prop - ni_margin  
+A two-sided Fisher's Exact test can be applied to determine if an observed survival rate is significantly different (non-directional) than a control survival. The test can be applied where observed survival is ≤ 98% and statistical evidence to support the survival estimate is desired with a control group.
 
-# Function to perform non-inferiority test
-perform_ni_test <- function(pump_survivors, pump_total, ni_threshold) {
-  # Test H0: pump_prop < ni_threshold vs H1: pump_prop >= ni_threshold
-  result <- binom.test(pump_survivors, pump_total, p = ni_threshold, 
-                      alternative = "greater")
-  return(result)
-}
+Excessively large sample sizes will be required to show 98% is different to 100%. This is unethical, and should therefore use confidence interval estimation primarily as little is gained by showing difference with a control group.
 
-# Scenario 1: Poor pump performance (95% survival)
-pump_survivors_1 <- 82
-pump_total_1 <- 105
-result_1 <- perform_ni_test(pump_survivors_1, pump_total_1, ni_threshold)
+```{r difference_test, eval=FALSE}
 
-result_1
+# Example data 98% survival at minimum sample size of 400 where 95% CI = 96.11% - 98.98%
+observed_impact_surv = 0.98
+impact_n = 400
+surv_impact <- observed_impact_surv*impact_n
+dead_impact <- impact_n - surv_impact
+
+observed_control_surv = 1
+control_n = 134 #approx 1:3
+surv_control <- observed_control_surv*control_n
+dead_control <- control_n - surv_control
+
+survival_matrix <- matrix(c(surv_impact, dead_impact, surv_control, dead_control), 
+                             nrow = 2, byrow = TRUE)
+fisher.test(survival_matrix, alternative = "two.sided")
+
+#p = 0.219
+#See power analysis below for required sample size to show a difference between impact (98%) and control (100%) exists
+
+
+# Example data: 97% survival at minimum sample size of 600 where 95% CI = 95.31 - 98.09%
+observed_impact_surv = 0.97
+impact_n = 600
+surv_impact <- observed_impact_surv*impact_n
+dead_impact <- impact_n - surv_impact
+
+observed_control_surv = 1
+control_n = 200 #approx 1:3
+surv_control <- observed_control_surv*control_n
+dead_control <- control_n - surv_control
+
+survival_matrix <- matrix(c(surv_impact, dead_impact, surv_control, dead_control), 
+                             nrow = 2, byrow = TRUE)
+fisher.test(survival_matrix, alternative = "two.sided")
+
+#p = 0.01022
+# Suggests sample size could actually be lower than if using CI alone
+#See power analysis below for required sample size to show a difference between impact (97%) and control (100%) exists
+
+
+# Example data: 90% survival at minimum sample size of 100 where 95% CI = 82.56 -  94.48%
+observed_impact_surv = 0.97
+impact_n = 100
+surv_impact <- observed_impact_surv*impact_n
+dead_impact <- impact_n - surv_impact
+
+observed_control_surv = 1
+control_n = 33 #approx 1:3
+surv_control <- observed_control_surv*control_n
+dead_control <- control_n - surv_control
+
+survival_matrix <- matrix(c(surv_impact, dead_impact, surv_control, dead_control), 
+                             nrow = 2, byrow = TRUE)
+fisher.test(survival_matrix, alternative = "two.sided")
+
+#p = 0.5738
+#See power analysis below for required sample size to show a difference between impact (90%) and control (100%) exists
+
+
 ```
-
-
-```{r}
-
-
-# Define parameters
-p1 <- 0.98  # control
-p2 <- 0.94  # impact
-delta <- 0.01  # margin (for superiority test)
-
-# Effect size (Cohen's h)
-ES.h <- function(p1, p2) 2 * asin(sqrt(p1)) - 2 * asin(sqrt(p2))
-
-effect_size <- abs(ES.h(p1, p2))
-
-# Power analysis for superiority (one-sided)
-# Note: power.prop.test assumes two-sided by default, set alternative="one.sided"
-# Also, control sample size = n, impact sample size = n * ratio
-sample_size_result <- pwr.2p.test(h = effect_size,
-                                 power = 0.8,
-                                 sig.level = 0.05,
-                                 alternative = "greater") # "greater" = one-sided test
-
-# Sample size for equal groups
-n_equal <- ceiling(sample_size_result$n)
-
-# Adjust for unequal group sizes: say control is 1/3 of impact
-ratio <- 1/3
-
-# Compute total sample sizes with ratio: control = n_control, impact = n_impact
-n_control <- ceiling(n_equal * ratio)
-n_impact <- ceiling(n_equal)
-
-cat("Approximate sample sizes needed for 80% power:\n")
-cat("Control group n =", n_control, "\n")
-cat("Impact group n =", n_impact, "\n")
-
-```
-
-
 
 ### 3.2.1 Power
 
+```{r difference_power, eval = FALSE}
+
+# Test for any difference between groups when impact survival = 98%
+find_min_sample_size_fisher(p_impact = 0.98, p_control = 1,
+                                    alpha = 0.05, power_target = 0.8, 
+                                    group_ratio = 3, step_size = 1, 
+                                    alternative = "two.sided")
+
+# sample size of at least impact n = 735, control n = 245 to  show a difference between impact (98%) and control (100%) exists
+
+# observed_impact_surv = 0.98
+# impact_n = 735
+# surv_impact <- observed_impact_surv*impact_n
+# dead_impact <- impact_n - surv_impact
+
+# observed_control_surv = 1
+# control_n = 245 #approx 1:3
+# surv_control <- observed_control_surv*control_n
+# dead_control <- control_n - surv_control
+
+# survival_matrix <- matrix(c(surv_impact, dead_impact, surv_control, dead_control), 
+#                              nrow = 2, byrow = TRUE)
+# fisher.test(survival_matrix, alternative = "two.sided")
+#p = 0.02944
+
+# Test for any difference between groups when impact survival = 97%
+find_min_sample_size_fisher(p_impact = 0.97, p_control = 1,
+                                    alpha = 0.05, power_target = 0.8, 
+                                    group_ratio = 3, step_size = 1, 
+                                    alternative = "two.sided")
+
+# sample size of at least impact n = 492, control n = 164 to  show a difference between impact (97%) and control (100%) exists
+
+ # observed_impact_surv = 0.97
+ # impact_n = 492
+ # surv_impact <- observed_impact_surv*impact_n
+ # dead_impact <- impact_n - surv_impact
+ # 
+ # observed_control_surv = 1
+ # control_n = 164 #approx 1:3
+ # surv_control <- observed_control_surv*control_n
+ # dead_control <- control_n - surv_control
+ # 
+ # survival_matrix <- matrix(c(surv_impact, dead_impact, surv_control, dead_control),
+ #                              nrow = 2, byrow = TRUE)
+ # fisher.test(survival_matrix, alternative = "two.sided")
+
+#p = 0.02885
+
+# Test for any difference between groups when impact survival = 90%
+find_min_sample_size_fisher(p_impact = 0.9, p_control = 1,
+                                    alpha = 0.05, power_target = 0.8, 
+                                    group_ratio = 3, step_size = 1, 
+                                    alternative = "two.sided")
+
+# sample size of at least impact n = 147, control n = 49 to  show a difference between impact (90%) and control (100%) exists
+
+ # observed_impact_surv = 0.9
+ # impact_n = 147
+ # surv_impact <- observed_impact_surv*impact_n
+ # dead_impact <- impact_n - surv_impact
+ # 
+ # observed_control_surv = 1
+ # control_n = 49 #approx 1:3
+ # surv_control <- observed_control_surv*control_n
+ # dead_control <- control_n - surv_control
+ # 
+ # survival_matrix <- matrix(c(surv_impact, dead_impact, surv_control, dead_control),
+ #                              nrow = 2, byrow = TRUE)
+ # fisher.test(survival_matrix, alternative = "two.sided")
+
+#p = 0.0247
 
 
-## 3.3 Superiority testing
+```
+
+Powering the test to detect a difference is not statistically meaningful when we observe marginally compliant survival, or where control survival is imperfect and we need to understand if the pump was actually harmful. 
+
+## 3.3 Inferiority testing
 
 ### 3.3.1 Test
 
-### 3.3.1 Power
+- One-sided: Is impact survival statistically lower than control survival?
+
+Scenario: Observed 98% survival
+          Observed ≤ 97% survival
+
+Objective: Is pump survival inferior to control survival? Does the pump cause harm?
+
+A one-sided Fisher's Exact test can be applied to determine if an observed impact survival rate is significantly lower (less) than a control survival. The test can be applied where observed survival is ≤ 98% and statistical evidence to support the survival estimate is desired with a control group.
 
 
-## 3.4 Difference testing
+```{r inferiority_test, eval = FALSE}
 
-### 3.4.1 Test
+# Example data 98% survival at minimum sample size of 400 where 95% CI = 96.11% - 98.98%
+observed_impact_surv = 0.98
+impact_n = 400
+surv_impact <- observed_impact_surv*impact_n
+dead_impact <- impact_n - surv_impact
 
+observed_control_surv = 1
+control_n = 134 #approx 1:3
+surv_control <- observed_control_surv*control_n
+dead_control <- control_n - surv_control
 
-```{r}
-# Demonstrating incorrect use of difference testing
+survival_matrix <- matrix(c(surv_impact, dead_impact, surv_control, dead_control), 
+                             nrow = 2, byrow = TRUE)
+fisher.test(survival_matrix, alternative = "less")
 
-pump_alive <- 488
-pump_dead <- 12
-control_alive <- 500
-control_dead <- 0
-# Create the contingency table properly
-create_contingency_table <- function(pump_alive, pump_dead, control_alive, control_dead) {
-  matrix(c(pump_alive, pump_dead, control_alive, control_dead), 
-         nrow = 2, ncol = 2, byrow = TRUE,
-         dimnames = list(c("Pump", "Control"), c("Alive", "Dead")))
-}
-
-# Scenario 1: Poor pump performance (95% survival)
-table_1 <- create_contingency_table(pump_alive, pump_dead, control_alive, control_dead)
-print(table_1)
-
-result_1 <- fisher.test(table_1, alternative = "two.sided")
-print(result_1)
+# p = 0.09737
+#See power analysis below for required sample size to show impact (98%) survival is less than control (100%).
 
 
-pump_mortality <- 196/200  # 2% mortality
-control_mortality <- 0.5/200  # 0.5% mortality
+# Example data: 97% survival at minimum sample size of 600 where 95% CI = 95.31 - 98.09%
+observed_impact_surv = 0.97
+impact_n = 600
+surv_impact <- observed_impact_surv*impact_n
+dead_impact <- impact_n - surv_impact
 
-#Approximate power using pwr package (normal approximation)
-power_approx <- pwr.2p.test(
-  h = ES.h(pump_mortality, control_mortality),  # Effect size
-  n = 300,  # Sample size per group
-  sig.level = 0.05,
-  alternative = "two.sided"
-)
-print(power_approx)
+observed_control_surv = 1
+control_n = 200 #approx 1:3
+surv_control <- observed_control_surv*control_n
+dead_control <- control_n - surv_control
 
-# determine sample size for 80% power
-sample_size_needed <- pwr.2p.test(
-  h = ES.h(pump_mortality, control_mortality), #effect size
-  power = 0.8,
-  sig.level = 0.05,
-  alternative = "two.sided"
-)
-print(sample_size_needed)
+survival_matrix <- matrix(c(surv_impact, dead_impact, surv_control, dead_control), 
+                             nrow = 2, byrow = TRUE)
+fisher.test(survival_matrix, alternative = "less")
 
-power.prop.test(
-  p1 = 0.02,
-  p2 = 0.00,
-  sig.level = 0.05,
-  power = 0.8,
-  alternative = "two.sided"
-)
+#p = 0.005284
+# Suggests sample size could actually be lower than if using CI alone
+#See power analysis below for required sample size to show a difference between impact (97%) and control (100%) exists
 
 
-matrix_data <- matrix(c(219, 0, 68, 0), nrow = 2, byrow = TRUE)
-fisher.test(matrix_data)
+# Example data: 90% survival at minimum sample size of 100 where 95% CI = 82.56 -  94.48%
+observed_impact_surv = 0.97
+impact_n = 100
+surv_impact <- observed_impact_surv*impact_n
+dead_impact <- impact_n - surv_impact
 
-power.prop.test(
-  n = NULL,              # let R solve for this
-  p1 = 1 - 0.94,       # pump mortality
-  p2 = 0.00,             # control mortality
-  sig.level = 0.05,
-  power = 0.8,
-  alternative = "two.sided",
-  ratio = 3              # n1 / n2 = 300 / 100
-)
+observed_control_surv = 1
+control_n = 33 #approx 1:3
+surv_control <- observed_control_surv*control_n
+dead_control <- control_n - surv_control
 
+survival_matrix <- matrix(c(surv_impact, dead_impact, surv_control, dead_control), 
+                             nrow = 2, byrow = TRUE)
+fisher.test(survival_matrix, alternative = "less")
+
+#p = 0.4219
+#See power analysis below for required sample size to show a difference between impact (90%) and control (100%) exists
 
 
 ```
 
-```{r}
 
-#Power calculator for difference testing
+The key observation is that we increase statistical power when using a one-sided test. We are able to justify this as the pump is never likely to exceed control survival, nor is significance in this direction of interest.
 
-simulate_fisher_power <- function(n1, n2, p1, p2, alpha = 0.05, reps = 10000) {
-  sig_count <- 0
-  for (i in 1:reps) {
-    grp1 <- rbinom(1, n1, p1)
-    grp2 <- rbinom(1, n2, p2)
-    mat <- matrix(c(grp1, n1 - grp1, grp2, n2 - grp2), nrow = 2, byrow = TRUE)
-    test <- fisher.test(mat)
-    if (test$p.value < alpha) sig_count <- sig_count + 1
-  }
-  return(sig_count / reps)
-}
+### 3.2.1 Power
 
-find_min_sample_size_fisher <- function(p1, p2, alpha = 0.05, power_target = 0.8,
-                                        max_n = 1000, group_ratio = 1, reps = 1000) {
-  for (n2 in seq(10, max_n, by = 10)) {
-    n1 <- round(n2 * group_ratio)
-    power <- simulate_fisher_power(n1, n2, p1, p2, alpha, reps)
-    if (power >= power_target) {
-      return(list(n1 = n1, n2 = n2, power = power))
-    }
-  }
-  return(NULL)
-}
+```{r inferiority_power, eval = FALSE}
 
-# Example: impact survival = 98%, control = 100%
-find_min_sample_size_fisher(p1 = 0.90, p2 = 1.0, group_ratio = 3, power_target = 0.8)
+# Test for any difference between groups when impact survival = 98%
+find_min_sample_size_fisher(p_impact = 0.98, p_control = 1,
+                                    alpha = 0.05, power_target = 0.8, 
+                                    group_ratio = 3, step_size = 1, 
+                                    alternative = "less")
 
-# suggested 
-# n1 = 510
-# n2 = 170
+# sample size of at least impact n = 681, control n = 227 to show impact (98%) is inferior to control (100%)
 
-#calculate mortality
-#n1 0.97 x 510 
-# mortality = 15
+ # observed_impact_surv = 0.98
+ # impact_n = 681
+ # surv_impact <- observed_impact_surv*impact_n
+ # dead_impact <- impact_n - surv_impact
+ # 
+ # observed_control_surv = 1
+ # control_n = 227 #approx 1:3
+ # surv_control <- observed_control_surv*control_n
+ # dead_control <- control_n - surv_control
+ # 
+ # survival_matrix <- matrix(c(surv_impact, dead_impact, surv_control, dead_control),
+ #                              nrow = 2, byrow = TRUE)
+ # fisher.test(survival_matrix, alternative = "less")
+#p = 0.01723
 
-matrix_data <- matrix(c(510, 15, 170, 0), nrow = 2, byrow = TRUE)
-#matrix structure has total first, deaths second
-fisher.test(matrix_data, alternative = "two.sided")
-# p = 0.02834 "there is a difference"
+# Test for any difference between groups when impact survival = 97%
+find_min_sample_size_fisher(p_impact = 0.97, p_control = 1,
+                                    alpha = 0.05, power_target = 0.8, 
+                                    group_ratio = 3, step_size = 1, 
+                                    alternative = "less")
 
-fisher.test(matrix_data, alternative = "less")
-# p = 0.014 "survival was lower in impact"
+# sample size of at least impact n = 453, control n = 151 to show impact (97%) is inferior to control (100%) exists
 
+ # observed_impact_surv = 0.97
+ # impact_n = 453
+ # surv_impact <- observed_impact_surv*impact_n
+ # dead_impact <- impact_n - surv_impact
+ # 
+ # observed_control_surv = 1
+ # control_n = 151 #approx 1:3
+ # surv_control <- observed_control_surv*control_n
+ # dead_control <- control_n - surv_control
+ # 
+ # survival_matrix <- matrix(c(surv_impact, dead_impact, surv_control, dead_control),
+ #                              nrow = 2, byrow = TRUE)
+ # fisher.test(survival_matrix, alternative = "less")
 
+#p = 0.01693
 
+# Test for any difference between groups when impact survival = 90%
+find_min_sample_size_fisher(p_impact = 0.9, p_control = 1,
+                                    alpha = 0.05, power_target = 0.8, 
+                                    group_ratio = 3, step_size = 1, 
+                                    alternative = "less")
 
+# sample size of at least impact n = 135, control n = 45 to show impact (90%) is inferior to control (100%) exists
 
+ observed_impact_surv = 0.9
+ impact_n = 135
+ surv_impact <- observed_impact_surv*impact_n
+ dead_impact <- impact_n - surv_impact
 
+ observed_control_surv = 1
+ control_n = 45 #approx 1:3
+ surv_control <- observed_control_surv*control_n
+ dead_control <- control_n - surv_control
 
+ survival_matrix <- matrix(c(surv_impact, dead_impact, surv_control, dead_control),
+                              nrow = 2, byrow = TRUE)
+ fisher.test(survival_matrix, alternative = "less")
 
-#Calculate sample size for showing that impact is < control, when we observe mortality in control group
+#p = 0.01532
 
-simulate_fisher_power <- function(n1, n2, p_impact, p_control, alpha = 0.05, reps = 5000) {
-  sig_count <- 0L
-  for (i in seq_len(reps)) {
-    # simulate survivors then convert to deaths
-    surv1 <- rbinom(1, n1, p_impact)   # survivors in impact
-    surv2 <- rbinom(1, n2, p_control)  # survivors in control
-    dead1 <- n1 - surv1
-    dead2 <- n2 - surv2
-    
-    # contingency table with rows = groups, cols = (dead, alive)
-    # row1 = impact, row2 = control
-    mat <- matrix(c(dead1, surv1, dead2, surv2), nrow = 2, byrow = TRUE)
-    
-    # One-sided: test whether mortality in impact is greater than in control
-    p_val <- fisher.test(mat, alternative = "greater")$p.value
-    if (p_val < alpha) sig_count <- sig_count + 1L
-  }
-  return(sig_count / reps)
-}
-
-find_min_sample_size_fisher <- function(p_impact, p_control, alpha = 0.05, power_target = 0.8,
-                                        max_n_control = 2000, group_ratio = 3, reps = 3000, step = 10) {
-  for (n_control in seq(10, max_n_control, by = step)) {
-    n_impact <- round(n_control * group_ratio)
-    power_est <- simulate_fisher_power(n_impact, n_control, p_impact, p_control, alpha, reps)
-    cat("control:", n_control, "impact:", n_impact, "power:", round(power_est, 3), "\n")
-    if (!is.na(power_est) && power_est >= power_target) {
-      return(list(n_impact = n_impact, n_control = n_control, power = power_est))
-    }
-  }
-  return(NULL)
-}
-
-# Run for your scenario:
-set.seed(123)
-res <- find_min_sample_size_fisher(p_impact = 0.98, p_control = 1,
-                                   alpha = 0.05, power_target = 0.8,
-                                   max_n_control = 2000, group_ratio = 3,
-                                   reps = 3000, step = 10)
-print(res)
-
-# suggested 
-# n1 = 660
-# n2 = 220
-
-#calculate mortality
-#n1 0.94 x 660 
-# mortality = 39
-#n1 0.98 x 220 
-# mortality = 4
-matrix_data <- matrix(c(621, 39,
-                        216, 4),
-                      nrow = 2, byrow = TRUE)
-
-fisher.test(matrix_data, alternative = "less")
 
 ```
 
+What about when we observe non-compliant pump survival but control survival was also < 100%?
 
-check if the fishers exact test is fundamentally different to the exact binomial test. I think it's the same, it just uses the matrix of impact and survival instead of impact proportion and compliance level
+We can frame the question in two approaches:
 
+Inferiority test: Does the pump harm fish more than background mortality (e.g., mortality caused by net or handling control)? This approaches uses the existing one-sided Fisher's exact test and is defensible when impact mortality is  lower than control mortality (e.g., it causes an additional mortality to background). However, it can theoretically detect any difference, and a significant result could therefore falsely conclude pump is harmful if there is enough statistical power to detect a small difference (e.g., 1%). Prove the pump is worse for fish that enter the pump than fish which do not enter the pump. Pump causes demonstrable harm.
 
-
-### 3.4.1 Power
-
+Equivalence test: Is pump performance within 2% of background mortality (our new accepted standard based on control background mortality)? This approaches uses TOST ...... 
 
 ## 3.5 Equivelance testing
 
 ### 3.5.1 Test
 
+TOST is unlikely to be suitable here because it is a very conservative approach. The test requires the entire confidence interval to fit within the given equivalence bounds. Therefore, sample sizes are likely to be very large and an even higher demand than difference or inferiority testing.
+
+```{r tost_test, eval= FALSE}
+
+# Example data: 90% pump survival and 91% control survival
+# Test for equivalence
+TOSTtwo.prop(prop1 = 0.9,      # e.g., 0.94
+             prop2 = 0.91,   # e.g., 0.96  
+             n1 = 800,                 # e.g., 300
+             n2 = 800,              # e.g., 200
+             low_eqbound = -0.02,             # -2% margin
+             high_eqbound = 0.02,             # +2% margin
+             alpha = 0.05)
+
+```
+
 ### 3.5.1 Power
 
+```{r tost_power, eval = FALSE}
 
+#Not working
 
-```{r}
-#Equivalence
-
-control_survivors <- 50
-control_deaths <- 0
-control_total <- 50
-control_prop <- 1.0
-
-# Equivalence margin: ±2%
-equiv_margin <- 0.02
-
-# Function to perform equivalence test
-perform_equiv_test <- function(pump_survivors, pump_total, control_prop, control_total, equiv_margin) {
-  pump_prop <- pump_survivors / pump_total
-  
-  result <- TOSTtwo.prop(prop1 = pump_prop, prop2 = control_prop,
-                        n1 = pump_total, n2 = control_total,
-                        low_eqbound = -equiv_margin, high_eqbound = equiv_margin)
-  
-  return(list(
-    pump_prop = pump_prop,
-    difference = pump_prop - control_prop,
-    within_bounds = abs(pump_prop - control_prop) <= equiv_margin,
-    tost_result = result
-  ))
-}
-
-
-result_1 <- perform_equiv_test(190, 200, control_prop, control_total, equiv_margin)
-result_1
-
-TOSTtwo.prop(prop1 = 0.94,
-             prop2 = 0.98,
-             n1 = 100,
-             n2 = 200,
-             low_eqbound = -0.02,
-             high_eqbound = 0.02,
-             alpha = 0.05)
-
-# 90% CI: [-0.075, -0.025] = [-7.5%, -2.5%] ---> entire EQ Bounds (2%) outside of CI
-# therefore, 
+# Power analysis
+powerTOSTtwo.prop(alpha = 0.05,
+                  statistical_power = 0.8,
+                  prop1 = 0.9,              # expected impact
+                  prop2 = 0.91,              # expected control
+                  N = NULL,                  # calculate required N
+                  low_eqbound_prop = -0.02,  # -2% margin
+                  high_eqbound_prop = 0.02)  # +2% margin
 
 
 ```
 
 
+Overall, our entire fish survival framework comes down to four considerations.
 
-```{r}
-# quick check wilson binomial 95% CI 
-# survivors, total, correct ()
-prop.test(135, 150, correct=FALSE)$conf.int
-# R code for power calculation
-power.prop.test(p1 = 0.98, p2 = 0.99, power = 0.8, sig.level = 0.05, alternative = "one.sided")
-result <- binom.test(x = 198, n = 200, p = 0.98, alternative = "greater")
-print(result)
-
-critical_value <- qbinom(1 - 0.05, 200, 0.98) + 1  # = 199
-# Need ≥199 survivors out of 200 to demonstrate compliance at α=0.05
-
-# Power when true survival = 99%
-power <- 1 - pbinom(198, 200, 0.99) 
-power
-# Find required sample size for 80% power
-
-power.prop.test(
-  n = NULL,           # what we want to find
-  p1 = 0.99,          # true survival rate  
-  p2 = 0.98,          # threshold
-  sig.level = 0.05,
-  power = 0.8,
-  alternative = "one.sided"
-)
-
-pwr.p.test(
-  h = ES.h(p1 = 0.99, p2 = 0.98),  # Effect size
-  sig.level = 0.05,
-  power = 0.8,
-  alternative = "greater"
-)
-
-find_exact_sample_size <- function(p0 = 0.98, p1 = 0.90, alpha = 0.05, target_power = 0.8) {
+- 95% Confidence interval estimation
+  Always applied to ensure precise survival estimate. Used exclusively for high survival scenarios to prevent unethical sample designs (98%, 99%, 100%)
   
-  for (n in 100:2000) {
-    # Exact critical value for one-sided test
-    critical_value <- qbinom(1 - alpha, n, p0) + 1
-    
-    # Exact power calculation  
-    power <- 1 - pbinom(critical_value - 1, n, p1)
-    
-    if (power >= target_power) {
-      return(list(
-        n = n,
-        power = power,
-        critical_value = critical_value,
-        rejection_region = paste("≥", critical_value, "survivors out of", n)
-      ))
-    }
-  }
-}
-
-# Find exact sample size
-exact_result <- find_exact_sample_size()
-print(exact_result)
-
-# Function to calculate exact sample size for any p0/p1 combination
-calc_exact_n <- function(p0, p1, alpha = 0.05, target_power = 0.8, max_n = 2000) {
+- Exact Binomial compliance test
+  May be applied to show compliance if a control group is committed, or when survival is high and desire to     statistically prove > 98%.
   
-  if (p1 <= p0) return(NA)  # p1 must be > p0
+- Fisher's Exact test (two.sided difference)
+  May be applied to show a difference between impact and control fish when survival < 99%. Not advised to apply as we are interested in pump harm.
   
-  for (n in 50:max_n) {
-    critical_value <- qbinom(1 - alpha, n, p0) + 1
-    power <- 1 - pbinom(critical_value - 1, n, p1)
-    
-    if (power >= target_power) {
-      return(n)
-    }
-  }
-  return(NA)  # Couldn't achieve target power
-}
-
-# Create grid of p0/p1 combinations
-p0_values <- seq(0.95, 0.99, by = 0.01)  # thresholds
-p1_values <- seq(0.96, 1.00, by = 0.01)  # true rates
-
-# Calculate sample sizes for all combinations
-power_grid <- expand_grid(p0 = p0_values, p1 = p1_values) %>%
-  mutate(
-    effect_size = p1 - p0,
-    sample_size = map2_dbl(p0, p1, calc_exact_n)
-  ) %>%
-  filter(!is.na(sample_size), effect_size > 0)
-
-# View table
-power_grid %>%
-  select(p0, p1, effect_size, sample_size) %>%
-  arrange(p0, p1)
-
-# Heatmap
-ggplot(power_grid, aes(x = p0, y = p1, fill = sample_size)) +
-  geom_tile() +
-  scale_fill_viridis_c(name = "Sample\nSize") +
-  labs(x = "Threshold (p0)", y = "True Rate (p1)", 
-       title = "Sample Size Requirements for Compliance Testing") +
-  theme_JN()
-
-# Curve for fixed thresholds
-power_grid %>%
-  filter(p0 %in% c(0.96, 0.97, 0.98, 0.99)) %>%
-  ggplot(aes(x = effect_size, y = sample_size, color = factor(p0))) +
-  geom_line(size = 1) +
-  geom_point() +
-  labs(x = "Effect Size (p1 - p0)", y = "Required Sample Size",
-       color = "Threshold\n(p0)") +
-  theme_JN()
-
-
-TOSTtwo.prop(prop1 = 0.97,
-             prop2 = 0.99,
-             n1 = 300,
-             n2 = 200,
-             low_eqbound = -0.02,
-             high_eqbound = 1,
-             alpha = 0.05)
-
-
-powerTOSTtwo.prop(
-  alpha = 0.05,
-  N = NULL,           # calculate required total sample size
-  prop1 = 0.96,       # expected impact proportion
-  prop2 = 0.99,       # expected control proportion  
-  low_eqbound = -0.02, # non-inferiority bound (-2%)
-  high_eqbound = 0.02, # usually symmetric for TOST
-  statistical_power = 0.8)
-
-powerTOSTtwo.prop(
-  alpha = 0.05,
-  statistical_power = 0.8,
-  prop1 = 0.96,              # impact group
-  prop2 = 0.99,              # control group
-  N = NULL,                  # calculate required total N
-  low_eqbound_prop = -0.02,  # non-inferiority bound (-2%)
-  high_eqbound_prop = 0.02   # upper bound (for TOST equivalence)
-)
-```
-
-
+- Fisher's Exact test (one.sided inferiority)
+  The primary test consideration when impact survival < 98%. Show inferiority from impact group to control group.
+  
+ Next to-do:
+ 
+ - Build up the visualizations to show these choices e.g., power curves.
+ - Sequential testing procedure when using one-sided fisher's exact. What are the lowest possible sample sizes, and create a stopping decision critieria  like the mortality table Account for alpha spend, data peeking? Not sure.

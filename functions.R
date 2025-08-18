@@ -308,6 +308,68 @@ find_compliance_sample_size <- function(
 }
 
 
+# Modified Fisher's Exact Power Analysis Functions
+# Uses survival-first matrix structure consistently
+
+simulate_fisher_power <- function(n_impact, n_control, p_impact, p_control, alpha = 0.05, alternative = "less") {
+  reps <- 5000  # Hardcoded
+  sig_count <- 0L
+  
+  for (i in seq_len(reps)) {
+    # Simulate survivors
+    surv_impact <- rbinom(1, n_impact, p_impact)
+    surv_control <- rbinom(1, n_control, p_control)
+    
+    # Calculate deaths
+    dead_impact <- n_impact - surv_impact
+    dead_control <- n_control - surv_control
+    
+    # Survival-first matrix: [survived, died]
+    # Row 1 = impact, Row 2 = control
+    survival_matrix <- matrix(c(surv_impact, dead_impact, surv_control, dead_control), 
+                              nrow = 2, byrow = TRUE)
+    
+    # Test with specified alternative
+    p_val <- fisher.test(survival_matrix, alternative = alternative)$p.value
+    if (p_val < alpha) sig_count <- sig_count + 1L
+  }
+  
+  return(sig_count / reps)
+}
+
+find_min_sample_size_fisher <- function(p_impact, p_control, alpha = 0.05, power_target = 0.8,
+                                        group_ratio = 3, step_size = 10, alternative = "less") {
+  
+  max_n_control <- 2000  # Hardcoded
+  
+  for (n_control in seq(30, max_n_control, by = step_size)) {
+    n_impact <- round(n_control * group_ratio)
+    
+    power_est <- simulate_fisher_power(n_impact, n_control, p_impact, p_control, alpha, alternative)
+    
+    cat("control n =", n_control, ", impact n =", n_impact, ", power =", round(power_est, 3), "\n")
+    
+    if (!is.na(power_est) && power_est >= power_target) {
+      # Calculate final p-value for output
+      final_p <- simulate_fisher_power(n_impact, n_control, p_impact, p_control, alpha, alternative)
+      
+      cat("\n=== FINAL RESULT ===\n")
+      cat("control n =", n_control, ", impact n =", n_impact, ", p =", round(final_p, 3), ", power =", round(power_est, 3), "\n")
+      
+      return(list(
+        n_control = n_control,
+        n_impact = n_impact, 
+        p_value = final_p,
+        power = power_est,
+        alternative = alternative
+      ))
+    }
+  }
+  
+  warning("Could not achieve target power within maximum sample size. Try increasing power_target tolerance or check effect size.")
+  return(NULL)
+}
+
 #  Summary functions ####
 
 # Determine acceptance and rejection rates for given sample size
@@ -938,3 +1000,46 @@ lookup_seq_95 <- function(exposed_fish, recaptured_fish, observed_deaths,
   
   return(invisible(decisions))
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+###non-inferiority testing###
+#
+# not sure about this approach as it only considers the variability in the impact group, and not the control group
+# This would be suitable if we had a known survival probability of one pump, and we wanted to ensure a new pump was not inferior to the existing one.
+# Reserve code for future potential pump comparisons 
+# 
+# control_survivors <- 64
+# control_deaths <- 17
+# control_total <- 81
+# control_prop <- control_survivors / control_total
+# 
+# # Non-inferiority margin: 2% (pump acceptable if ≥97%)
+# ni_margin <- 0.02
+# ni_threshold <- control_prop - ni_margin  
+# 
+# # Function to perform non-inferiority test
+# perform_ni_test <- function(pump_survivors, pump_total, ni_threshold) {
+#   # Test H0: pump_prop < ni_threshold vs H1: pump_prop >= ni_threshold
+#   result <- binom.test(pump_survivors, pump_total, p = ni_threshold, 
+#                        alternative = "greater")
+#   return(result)
+# }
+# 
+# # Scenario 1: Poor pump performance (95% survival)
+# pump_survivors_1 <- 82
+# pump_total_1 <- 105
+# result_1 <- perform_ni_test(pump_survivors_1, pump_total_1, ni_threshold)
+# 
+# result_1
