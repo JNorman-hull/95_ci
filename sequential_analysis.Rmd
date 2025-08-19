@@ -18,6 +18,7 @@ library(htmltools)
 library(pwr)
 library(TOSTER)
 library(cowplot)
+library(gsDesign)
 #library(gganimate)
 #library(ggpubr)
 #library(gt)
@@ -1198,4 +1199,27 @@ Overall, our entire fish survival framework comes down to four considerations.
  Next to-do:
  
  - Build up the visualizations to show these choices e.g., power curves.
- - Sequential testing procedure when using one-sided fisher's exact. What are the lowest possible sample sizes, and create a stopping decision critieria  like the mortality table Account for alpha spend, data peeking? Not sure.
+ - Sequential testing procedure when using one-sided fisher's exact. What are the lowest possible sample sizes, and create a stopping decision criteria like the mortality table Account for alpha spend, data peeking? Not sure.
+ 
+ 
+# 4. Group sequential design
+
+## 4.1 
+
+```{r}
+
+# One-sided, 4 interim analyses, O'Brien-Fleming boundaries
+design <- gsDesign(
+  k = 10,                # Number of interim analyses
+  test.type = 1,        # 1 = one-sided (H1: p_impact < p_control)
+  alpha = 0.05,         # Type I error
+  beta = 0.20,          # Type II error (Power = 80%)
+  sfu = "OF"            # O'Brien-Fleming spending function
+)
+
+# Print stopping boundaries (upper bounds are for efficacy)
+print(design)
+
+```
+ 
+ 
