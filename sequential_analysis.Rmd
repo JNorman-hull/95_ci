@@ -272,7 +272,7 @@ ht_simulation_results  <- read.csv("./input/ht_simulation_results.csv")
 
 Create interactive plot for decision making.
 
-```{r plotly, echo=FALSE, eval = FALSE}
+```{r plotly_decision_plot, echo=FALSE, eval = FALSE}
 
 decision_point <- mortality_sample_plot +
   geom_point(data = mortality_data, 
@@ -817,7 +817,7 @@ Group comparison test directional considerations
   - Use a survival-first matrix. It is critical the first row of the matrix represents the direction of compliance
   e.g., impact first = alternative tests against control
   
-For consistency, there is no need to consider reversing the matrix and asking if control is superior. We should always determine whether pump survival is inferior. If the two observed proportions are close (e.g., 94% impact, 95% control), we can switch to a TOST.
+For consistency, there is no need to consider reversing the matrix and asking if control is superior. We should always determine whether pump survival is inferior. If the two observed proportions are close (e.g., 94% impact, 95% control), we can switch to a TOST but this will hugely increase sample demands.
   
 To examine the question of 'Is pump acceptable despite meeting threshold exactly?', we can take a difference or inferiority test approach. The same approach will also be followed for determining test choice where we ask 'Does the pump cause harm?'
 
@@ -991,17 +991,28 @@ Objective: Is pump survival inferior to control survival? Does the pump cause ha
 
 A one-sided Fisher's Exact test can be applied to determine if an observed impact survival rate is significantly lower (less) than a control survival. The test can be applied where observed survival is ≤ 98% and statistical evidence to support the survival estimate is desired with a control group.
 
+What about when we observe non-compliant pump survival but control survival was also < 100%?
+
+The objective changes but the test remains the same.
+
+Objective: Does the pump harm fish more than background mortality (e.g., mortality caused by net or handling control)?
+           Prove the pump is worse for fish that enter the pump than fish which do not enter the pump. Pump causes demonstrable harm.
+
+The test choice does not change as we are examining absolute % difference between impact and control. What is important is the % difference between the two samples, not the overall proportion e.g., 47% impact vs 50% control is the same as 97% impact vs 100% control. However, it can theoretically detect any difference, and a significant result could therefore falsely conclude pump is harmful if there is enough statistical power to detect a small difference (e.g., 1%). Therefore, this means interpretation of the test results must accept that non-significant ≠ pump is safe but instead means insufficient statistical evidence to show harm. 
+
+•	Null hypothesis (H0) Survival in the pump exposure is not less than survival in the control exposure
+•	Alternative hypothesis (H1) Survival in the pump exposure is less than survival in the control exposure
 
 ```{r inferiority_test, eval = FALSE}
 
 # Example data 98% survival at minimum sample size of 400 where 95% CI = 96.11% - 98.98%
-observed_impact_surv = 0.98
-impact_n = 400
+observed_impact_surv = 0.94
+impact_n = 243
 surv_impact <- observed_impact_surv*impact_n
 dead_impact <- impact_n - surv_impact
 
 observed_control_surv = 1
-control_n = 134 #approx 1:3
+control_n = 121 #approx 1:3
 surv_control <- observed_control_surv*control_n
 dead_control <- control_n - surv_control
 
@@ -1053,16 +1064,28 @@ fisher.test(survival_matrix, alternative = "less")
 
 
 ```
-
-
 The key observation is that we increase statistical power when using a one-sided test. We are able to justify this as the pump is never likely to exceed control survival, nor is significance in this direction of interest.
 
 ### 3.2.1 Power
 
+Power analysis is used to simulate the observed data with a nominal number of simulations (e.g., 1000) to determine the power to detect a given alpha (e.g., 0.05). This means, every result in the simulation can theoretically achieve an alpha < 0.05, but the power reflects how likely we are to detect a significant result. Therefore, low powered studies are unreliable as we cannot confidently conclude that we would observe the same effect again, if we gathered the data from another independent population.
+
+Importance of correct study power
+1. We find a p-value = 0.01. This means, if there was truly NO difference, there's only a 1% chance I'd see results this extreme by random luck.
+2. Power of the study was 46%. This means, if there IS a real difference, I'd only detect it 46% of the time.
+
+Therefore, low powered studies are likely to increase Type I error rates e.g., Reject the null hypothesis when it is actually true. In our inferiority scenario, this means we can falsely conclude that pump exposure is less than survival, when actually it is not and a higher powered study would not have found this effect. We conclude the pump is harmful when actually the study was under powered and we made a false conclusion.
+
+Therefore we need two considerations:
+1. What does the power curve look like for each survival difference? This shows all the possible significant results and the respective power to detect them at a given sample size.
+2. What does the 80% power curve look like across each survival difference? This shows the minimum sample size required to achieve 80% power
+
+First, we can simulate specific scenarios for indivdual assesments.
+
 ```{r inferiority_power, eval = FALSE}
 
 # Test for any difference between groups when impact survival = 98%
-find_min_sample_size_fisher(p_impact = 0.98, p_control = 1,
+find_min_sample_size_fisher(p_impact = 0.99, p_control = 1,
                                     alpha = 0.05, power_target = 0.8, 
                                     group_ratio = 3, step_size = 1, 
                                     alternative = "less")
@@ -1135,19 +1158,414 @@ find_min_sample_size_fisher(p_impact = 0.9, p_control = 1,
 
 ```
 
-What about when we observe non-compliant pump survival but control survival was also < 100%?
+Second, we can simulate all difference of 1 - 50% to generate multiple power curves and comprehensive sample planning.
 
-We can frame the question in two approaches:
+### 3.2.2 Power simulation
 
-Inferiority test: Does the pump harm fish more than background mortality (e.g., mortality caused by net or handling control)? This approaches uses the existing one-sided Fisher's exact test and is defensible when impact mortality is  lower than control mortality (e.g., it causes an additional mortality to background). However, it can theoretically detect any difference, and a significant result could therefore falsely conclude pump is harmful if there is enough statistical power to detect a small difference (e.g., 1%). Prove the pump is worse for fish that enter the pump than fish which do not enter the pump. Pump causes demonstrable harm.
+```{r inferiority_power_all_diff, eval= FALSE}
 
-Equivalence test: Is pump performance within 2% of background mortality (our new accepted standard based on control background mortality)? This approaches uses TOST ...... 
+# Power Analysis Based on Percentage Point Differences
+# Same structure as original but using % differences instead of fixed survivals
+
+# Set parameters
+control_sizes <- seq(1, 500, by = 1)
+percentage_differences <- seq(1, 50, by = 1)  # 1% to 50% difference
+baseline_control_survival <- 1.0  # Control always 100%
+alpha <- 0.05
+group_ratio <- 3  # 3:1 impact:control
+
+power_results <- expand_grid(
+  n_control = control_sizes,
+  pct_difference = percentage_differences
+) %>%
+  mutate(
+    n_impact = n_control * group_ratio,
+    n_total = n_control + n_impact,
+    control_survival = baseline_control_survival,
+    impact_survival = baseline_control_survival - (pct_difference / 100),
+    # Ensure impact survival doesn't go below 0
+    impact_survival = pmax(impact_survival, 0)
+  ) %>%
+  filter(impact_survival >= 0)  # Remove impossible combinations
+
+# Simulate power using simulate_fisher_power function (number of iterations set in function, currently 1000)
+# wrap in execution time to measure processing time
+
+execution_time <- system.time(
+power_results$power <- pmap_dbl(
+  power_results %>% select(n_impact, n_control, impact_survival, control_survival),
+  function(n_impact, n_control, impact_survival, control_survival) {
+    simulate_fisher_power(
+      n_impact = n_impact,
+      n_control = n_control,
+      p_impact = impact_survival,
+      p_control = control_survival,
+      alpha = alpha,
+      alternative = "less"
+    )
+  }
+)
+)
+# simulation runs 1000 tests for each combination of control/impact allocation and percentage difference
+# 25,000 combinations = 25 million tests!
+# Takes approx 2.5 hours to simulate 25 million tests
+#write_csv(power_results, "./input/inferiority_power_results.csv")
+
+```
+
+Import previous simulation data
+
+```{r inferiority_power_import, echo = FALSE}
+
+inferiority_power_results  <- read.csv("./input/inferiority_power_results.csv")
+
+#control survival set as 100%, impact survival 99% - 50%. Labels irrelevant as it represents any % difference between impact and control
+
+```
+
+### 3.2.3 Visualise power curves
+
+```{r inferiority_power_vis}
+
+#Power Curves: Fisher's Exact Test (alternative = 'less'). Testing if impact survival < control survival, 3:1 allocation
+
+# Show power curves for 1% through 10% differences
+inferiority_power_plot <- inferiority_power_results %>%
+  filter(pct_difference %in% c(1, 2, 3, 6, 8, 10)) %>%
+  ggplot(aes(x = n_total, y = power, color = factor(pct_difference))) +
+  geom_smooth(se = FALSE, size = 1, method = "loess", span = 0.1) +
+  geom_hline(yintercept = 0.8, linetype = "dashed", color = "black", size = 0.8) +
+  scale_x_continuous(
+    breaks = seq(0, 2000, by = 100),
+    limits = c(100, 2000),
+    expand = c(0,0)) +
+   scale_y_continuous(
+    breaks = seq(0, 1, by = 0.1), 
+    limits = c(0, 1), 
+    expand = c(0, 0.01),
+    labels = scales::percent_format(accuracy = 1) ) +
+   scale_color_manual(
+    name = "Difference\n(% points)",
+    values = c(
+      "1" = "#999999",  # Light gray
+      "2" = "#D55E00",  # Vermillion
+      "3" = "#56B4E9",  # Sky blue
+      "6" = "#009E73",  # Bluish green
+      "8" = "#0072B2",  # Blue
+      "10" = "#CC79A7"  # Reddish purple
+    )
+  )+
+  labs(
+    x = "Total Sample Size (Impact:Control 3:1 allocation)",
+    y = "Statistical Power"
+  ) +
+  annotate(
+    "text",
+    x = 1800, 
+    y = 0.9, 
+    label = "Fisher's exact test (one-sided)\nPower (1-β) = 80%\nα = 0.05\nSamples = 1000",
+    hjust = 1,
+    vjust = 1,
+    size = 4,
+    color = "black",
+    fontface = "italic"
+  ) +
+  theme_JN() +
+  theme(
+    legend.position = "right",
+     panel.grid.major = element_line(color = alpha("black", 0.1), size = 0.5),
+      panel.ontop = FALSE,
+     axis.text.x = element_text(angle = 90, hjust = 1, vjust = 1)
+    )+
+  coord_cartesian(clip = "off")
+
+inferiority_power_plot
+
+```
+
+Interactive plot to show sample sizes across power curves
+
+```{r plotly_decision_plot, echo=FALSE, eval = FALSE}
+
+inferiority_point <- inferiority_power_plot +
+  geom_point(data = inferiority_power_results, 
+             aes(x = n_total, y = power, 
+                 text = paste(
+                   "Total size:", n_total, "<br>",
+                   "Control size:", n_control, "<br>",
+                   "Impact size:", n_impact)
+                 ),
+             alpha = 0, size = 1)
+
+inferiority_point_plotly <- ggplotly(inferiority_point, tooltip = "text")
+tmp <- tempfile(fileext = ".html")
+htmlwidgets::saveWidget(inferiority_point_plotly, tmp)
+browseURL(tmp)
+
+```
+
+### 3.2.4 Summarise minimal samples
+
+```{r min_inferiority_results}
+
+#Follows 3:1 allocation as previous
+
+min_inferiority_results <- inferiority_power_results %>%
+  filter(power >= 0.8) %>%
+  group_by(pct_difference) %>%
+  slice_min(n_total, n = 1) %>%  # Get minimum sample size achieving 80% power
+  ungroup() %>%
+  select(pct_difference, n_control, n_impact, n_total, power, 
+         control_survival, impact_survival) %>%
+  rename(achieved_power = power)
+
+min_inferiority_results
+
+```
+
+
+### 3.2.5 Visualise minimal samples
+
+
+```{r min_inferiority_plot}
+
+#Minimum Sample Size for 80% Power & α ≤ 0.05/Earliest N where Fisher's exact test (alternative='less') achieves adequate power
+
+annotation_points <- min_inferiority_results %>%
+  filter(pct_difference %in% c(1, 2, 3)) %>%
+  mutate(
+    label = paste(
+      "Total size:", n_total,"\n",
+      "Control size:", n_control,
+      "Impact size:", n_impact
+    )
+  )
+
+min_inferiority_plot <- min_inferiority_results %>%
+  ggplot(aes(x = pct_difference, y = n_total)) +
+  geom_smooth(se = FALSE, size = 1, method = "loess", span = 0.2, color = "black") +
+  geom_point(data = annotation_points, aes(x = pct_difference, y = n_total), 
+             color = "black", size = 3, shape = 16) +
+  geom_label(
+    data = annotation_points,
+    aes(x = pct_difference, y = n_total, label = label),
+    color = "black",
+    size = 3,
+    hjust = -0.1,
+    vjust = 0.5,
+    fill = NA,
+    label.size = 0
+  ) +
+    annotate(
+    "text",
+    x = 18, 
+    y = 1800, 
+    label = "Fisher's exact test (one-sided)\nPower (1-β) = 80%\nα = 0.05\nSamples = 1000",
+    hjust = 1,
+    vjust = 1,
+    size = 4,
+    color = "black",
+    fontface = "italic"
+  ) +
+  scale_x_continuous(breaks = seq(0, 20, by = 1), limits = c(0,20), expand = c(0,0)) +
+  scale_y_continuous(breaks = seq(0, 1800, by = 100), limits = c(0, 1900), expand = c(0,0)) +
+  labs(
+    x = "Difference control - impact (% points)",
+    y = "Total Sample Size (Impact:Control 3:1 allocation)",
+  ) +
+  theme_JN() +
+  theme(
+    panel.grid.major = element_line(color = alpha("black", 0.1), size = 0.5),
+    panel.ontop = FALSE
+  ) +
+  coord_cartesian(clip = "off")
+
+min_inferiority_plot
+
+```
+
+### 3.2.6 Group sequential design
+
+Now we know the fixed sample design requirement to statistically show impact survival is 2% less than control we can construct a group sequential design that allows for early stopping if we observe an increased difference earlier than our total planned sample size.
+
+The purpose of this design is to control our alpha spend throughout planned interim looks at the data. This prevents stopping early without high supportive evidence to make the decision (as it's unknown if stopping earlier prevents observing the true survival).
+
+Two considerations for alpha spending are:
+1. O'Brien-Fleming (OBF) Spending
+The OBF spending function is highly conservative in the early stages of a trial. It requires an extremely large treatment effect (a very high Z-score) to cross the efficacy boundary at an interim analysis. As the trial progresses, the required Z-score decreases. By the final analysis, the critical value is very close to what it would have been in a fixed-sample design (e.g., 1.96 for a two-sided alpha=0.05). It preserves the overall power of the trial extremely well. The "price" paid for the multiple looks is very small. It's very robust to fluke positive results that might occur by chance at an early interim look.
+
+2. Pocock Spending
+The Pocock spending function spends alpha more evenly across all analyses. The Z-score threshold for efficacy is roughly the same at each interim look and the final look (though it's always slightly more strict than 1.96). It is optimized for stopping the trial as soon as possible if the treatment effect is real and substantial. This is its primary benefit. This approach incurs a larger penalty for multiple looks. To maintain the overall Type I error rate, the final analysis requires a p-value stricter than the traditional 0.05 (e.g., a Z-score of ~2.2 instead of 1.96). Pocock is preferred in specific scenarios where the ethical imperatives, financial costs and practical requirements to stop early outweighs the statistical conservatism.
+
+Ultimately, we must make a decision up-front about what the expected survival difference is going to be, as introducing sequential design choice will increase sample size unless we get very strong evidence early that survival difference is greater than expected.
+
+For example, if we believe survival will be 6% difference, we can design a study around a max sample size of ~308, expose all of our fish and collect statistically meaningful data. But, if we planned the study for a 2% difference, we would have to continue until we exceed the sequential stopping boundary.
+
+Required sample size to observe a 6% difference
+impact: 231, control: 77 = 308 total
+p-value = 0.01609
+
+However, if we planned for 2% difference, and we observed a 6% difference at interval 3 (364 fish stopping point)
+Impact: 243, control: 121
+p-value = 0.002009
+Convert p-value to z-score = Z-score: 2.877 
+
+We can stop early in the trial. But we have used 56 more fish than if we had a fixed sample design. 
+
+This is the real cost of alpha spending to ensure we do not commit Type I error. We require higher sample sizes if a study is designed for a smaller effect size. We simply require stronger evidence to stop earlier in a trial planned for a smaller effect size. This is the intention of group sequential design, we have a penalty for multiple hypothesis testing to control the family wise error rate!
+
+Bottom line = if study designed for smaller effect, we can stop early, but requires more fish than if study designed for larger effect size
+
+Requirements:
+
+One sided Fisher's exact test (H1: p_impact < p_control)
+Alpha = 0.05
+Beta = 0.20
+Spending function O'Brien-Fleming 
+Allocation 3:1 impact:control
+Interim analyses every 100 fish
+Number for a fixed sample design = 908
+
+What is the endpoint design (normal or binomial)?
+
+
+```{r group_seq_design}
+
+# One-sided, 10 interim analyses, Pocock boundaries based on observing a 2% impact:control difference.
+pcock_2perc_design <- gsDesign(
+  k = 10,                # Number of interim analyses
+  test.type = 1,        # 1 = one-sided (H1: p_impact < p_control)
+  alpha = 0.05,         # Type I error
+  beta = 0.20,          # Type II error (Power = 80%)
+  sfu = "Pocock",            # O'Brien-Fleming spending function
+  n.fix = 908 # Fixed sample design informed by power analysis = total sample of 908
+)
+
+# One sided test will only present upper boundary for type I error. 
+# We do not need lower boundary for futility if we are only interested in detecting a one.sided effect (pump survival less than control) - is this correct?
+
+# Print stopping boundaries (upper bounds are for efficacy)
+#print(pcock_2perc_design)
+
+pocock_boundaries_table <- data.frame(
+  analysis = 1:10,
+  sample_size = ceiling(pcock_2perc_design$n.I),
+  z_boundary = round(pcock_2perc_design$upper$bound, 3),
+  p_boundary = round(pnorm(pcock_2perc_design$upper$bound, lower.tail = FALSE), 4)
+)
+
+pocock_boundaries_table
+
+plot(pcock_2perc_design, plottype = 1)
+# Shows our critical threshold of 2.27 and stopping points. Note that if we go to our final 'look', we have increased sample size from 908 to 1214 due to the penalty/alpha spend
+
+#plot(design, plottype = 2)
+#plot(design, plottype = 3)
+#plot(design, plottype = 4)
+#plot(design, plottype = 6)
+
+```
+
+Visualize the stopping boundary/sample size needed
+These plots need work, just needs to replicate the plot from gsDesign but with a cleaner appearance
+
+```{r pocock_boundaries_plot}
+
+p_boundaries <- boundaries_table %>%
+  ggplot(aes(x = analysis, y = z_boundary)) +
+  geom_line(size = 1.5, color = "red") +
+  geom_point(size = 4, color = "red") +
+  geom_text(aes(label = paste("Z =", z_boundary)), 
+            vjust = -0.5, size = 3.5, fontface = "bold") +
+  geom_hline(yintercept = 1.96, linetype = "dashed", alpha = 0.6) +
+  scale_x_continuous(breaks = 1:10, labels = paste("Analysis", 1:10)) +
+  #scale_y_continuous(breaks = seq(1.5, 4, by = 0.5), limits = c(1.5, 4.2)) +
+  labs(
+    title = "Sequential Stopping Boundaries for 2% Difference",
+    subtitle = "Stop if your Z-score exceeds the red line at any analysis",
+    x = "Interim Analysis",
+    y = "Z-score Boundary (Stop if Z > this value)",
+    caption = "Dashed line = traditional fixed study boundary (Z = 1.96)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    axis.text = element_text(size = 11),
+    panel.grid.minor = element_blank()
+  ) +
+  annotate("text", x = 3.5, y = 2.1, 
+           label = "Fixed study\nboundary", 
+           size = 3, alpha = 0.7)
+
+p_boundaries
+
+p_sample_sizes <- boundaries_table %>%
+  ggplot(aes(x = analysis, y = sample_size)) +
+  geom_line(size = 1.5, color = "blue") +
+  geom_point(size = 4, color = "blue") +
+  geom_text(aes(label = paste(sample_size, "fish")), 
+            vjust = -0.5, size = 3.5, fontface = "bold") +
+  scale_x_continuous(breaks = 1:10, labels = paste("Analysis", 1:10)) +
+  scale_y_continuous(breaks = seq(0, 1000, by = 100)) +
+  labs(
+    title = "Sample Sizes for Each Interim Analysis",
+    subtitle = "When to conduct each interim look",
+    x = "Interim Analysis",
+    y = "Total Sample Size"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    axis.text = element_text(size = 11),
+    panel.grid.minor = element_blank()
+  )
+
+p_sample_sizes
+
+```
+
+At each planned stopping interval (given in pocock_boundaries_table), calculate the Fisher's Exact test and check the p value against the p_boundary/z_boundary. This is pre-calculated, but can be checked for specific analysis on the go using p to z calculator
+
+```{r p_to_z}
+
+# Visualise what the stopping p value looks like for the givn z threshold
+p_to_z_visualizer(target_z = 2.27)
+
+# Using an example where we are interval 3 (total sample size = 364)
+# We have observed 6% survival difference in our impact group, can we stop?
+
+observed_impact_surv = 0.94
+impact_n = 243
+surv_impact <- observed_impact_surv*impact_n
+dead_impact <- impact_n - surv_impact
+
+observed_control_surv = 1
+control_n = 121 #approx 1:3
+surv_control <- observed_control_surv*control_n
+dead_control <- control_n - surv_control
+
+survival_matrix <- matrix(c(surv_impact, dead_impact, surv_control, dead_control), 
+                             nrow = 2, byrow = TRUE)
+fisher.test(survival_matrix, alternative = "less")
+
+#p-value = 0.002009
+
+#This exceeds the fixed p value threshold of 0.0116, so we know we can stop
+# lets check the Z score anyways
+
+p_to_z_calculator(0.002009)
+
+#Z-score: 2.877 
+# We can safely stop the test early and accept our result
+
+```
+
 
 ## 3.5 Equivelance testing
 
 ### 3.5.1 Test
 
-TOST is unlikely to be suitable here because it is a very conservative approach. The test requires the entire confidence interval to fit within the given equivalence bounds. Therefore, sample sizes are likely to be very large and an even higher demand than difference or inferiority testing.
+Equivalence test: Is pump performance within 2% of background mortality (our new accepted standard based on control background mortality)? This approaches uses TOST but is unlikely to be suitable here because it is a very conservative approach. The test requires the entire confidence interval to fit within the given equivalence bounds. Therefore, sample sizes are likely to be very large and an even higher demand than difference or inferiority testing.
 
 ```{r tost_test, eval= FALSE}
 
@@ -1178,11 +1596,10 @@ powerTOSTtwo.prop(alpha = 0.05,
                   low_eqbound_prop = -0.02,  # -2% margin
                   high_eqbound_prop = 0.02)  # +2% margin
 
-
 ```
 
 
-Overall, our entire fish survival framework comes down to four considerations.
+Overall, our entire fish survival framework comes down to five considerations.
 
 - 95% Confidence interval estimation
   Always applied to ensure precise survival estimate. Used exclusively for high survival scenarios to prevent unethical sample designs (98%, 99%, 100%)
@@ -1196,28 +1613,5 @@ Overall, our entire fish survival framework comes down to four considerations.
 - Fisher's Exact test (one.sided inferiority)
   The primary test consideration when impact survival < 98%. Show inferiority from impact group to control group.
   
- Next to-do:
- 
- - Build up the visualizations to show these choices e.g., power curves.
- - Sequential testing procedure when using one-sided fisher's exact. What are the lowest possible sample sizes, and create a stopping decision criteria like the mortality table Account for alpha spend, data peeking? Not sure.
- 
- 
-# 4. Group sequential design
-
-## 4.1 
-
-```{r}
-
-# One-sided, 4 interim analyses, O'Brien-Fleming boundaries
-design <- gsDesign(
-  k = 10,                # Number of interim analyses
-  test.type = 1,        # 1 = one-sided (H1: p_impact < p_control)
-  alpha = 0.05,         # Type I error
-  beta = 0.20,          # Type II error (Power = 80%)
-  sfu = "OF"            # O'Brien-Fleming spending function
-)
-
-# Print stopping boundaries (upper bounds are for efficacy)
-print(design)
-
-```
+- Pocock grouped sequential design
+  The primary method for controlling alpha spend with interim analysis.

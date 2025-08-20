@@ -312,7 +312,7 @@ find_compliance_sample_size <- function(
 # Uses survival-first matrix structure consistently
 
 simulate_fisher_power <- function(n_impact, n_control, p_impact, p_control, alpha = 0.05, alternative = "less") {
-  reps <- 5000  # Hardcoded
+  reps <- 1000  # Hardcoded
   sig_count <- 0L
   
   for (i in seq_len(reps)) {
@@ -342,7 +342,7 @@ find_min_sample_size_fisher <- function(p_impact, p_control, alpha = 0.05, power
   
   max_n_control <- 2000  # Hardcoded
   
-  for (n_control in seq(30, max_n_control, by = step_size)) {
+  for (n_control in seq(400, max_n_control, by = step_size)) {
     n_impact <- round(n_control * group_ratio)
     
     power_est <- simulate_fisher_power(n_impact, n_control, p_impact, p_control, alpha, alternative)
@@ -368,6 +368,18 @@ find_min_sample_size_fisher <- function(p_impact, p_control, alpha = 0.05, power
   
   warning("Could not achieve target power within maximum sample size. Try increasing power_target tolerance or check effect size.")
   return(NULL)
+}
+
+p_to_z_calculator <- function(p_value) {
+  if(p_value <= 0 | p_value >= 1) {
+    stop("P-value must be between 0 and 1")
+  }
+  z_score <- qnorm(p_value, lower.tail = FALSE)
+  
+  cat("P-value:", p_value, "\n")
+  cat("Z-score:", round(z_score, 3), "\n")
+  
+  return(z_score)
 }
 
 #  Summary functions ####
@@ -831,6 +843,49 @@ create_journey_plot_ht_comprehensive <- function(mortality_table,
 }
 
 
+p_to_z_visualizer <- function(target_z = NULL, p_range = c(0.0000001, 0.1)) {
+  
+  # Generate a sequence of p-values
+  p_values <- seq(p_range[1], p_range[2], length.out = 1000)
+  
+  # Calculate corresponding z-scores
+  z_scores <- qnorm(p_values, lower.tail = FALSE)
+  
+  # Create the plot
+  plot(p_values, z_scores, type = "l", lwd = 2, col = "blue",
+       xlab = "P-value", ylab = "Z-score",
+       main = "Relationship between P-values and Z-scores",
+       xlim = c(0, max(p_values)), ylim = c(0, max(z_scores)))
+  
+  grid()
+  
+  # Add reference lines for common significance levels
+  abline(h = c(1.645, 1.96, 2.576), col = "gray", lty = 2)
+  text(x = max(p_values) * 0.9, y = 1.645, "90% (1.645)", pos = 3, cex = 0.8)
+  text(x = max(p_values) * 0.9, y = 1.96, "95% (1.96)", pos = 3, cex = 0.8)
+  text(x = max(p_values) * 0.9, y = 2.576, "99% (2.576)", pos = 3, cex = 0.8)
+  
+  # If a target z-score is specified, find and mark the corresponding p-value
+  if (!is.null(target_z)) {
+    # Calculate p-value for target z-score
+    target_p <- pnorm(target_z, lower.tail = FALSE)
+    
+    # Add point and lines
+    points(target_p, target_z, col = "red", pch = 19, cex = 1.5)
+    abline(h = target_z, col = "red", lty = 2)
+    abline(v = target_p, col = "red", lty = 2)
+    
+    # Add text annotation
+    text(x = target_p, y = target_z, 
+         labels = paste0("Z = ", target_z, "\nP = ", round(target_p, 6)),
+         pos = 4, col = "red", cex = 0.9)
+    
+    cat("For a Z-score of", target_z, "the corresponding p-value is:", target_p, "\n")
+    
+    return(target_p)
+  }
+}
+
 # Lookup functions ####
 
 # Lookup mortality data from table
@@ -1000,14 +1055,6 @@ lookup_seq_95 <- function(exposed_fish, recaptured_fish, observed_deaths,
   
   return(invisible(decisions))
 }
-
-
-
-
-
-
-
-
 
 
 
