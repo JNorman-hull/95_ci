@@ -342,7 +342,7 @@ find_min_sample_size_fisher <- function(p_impact, p_control, alpha = 0.05, power
   
   max_n_control <- 2000  # Hardcoded
   
-  for (n_control in seq(400, max_n_control, by = step_size)) {
+  for (n_control in seq(100, max_n_control, by = step_size)) {
     n_impact <- round(n_control * group_ratio)
     
     power_est <- simulate_fisher_power(n_impact, n_control, p_impact, p_control, alpha, alternative)
@@ -368,6 +368,245 @@ find_min_sample_size_fisher <- function(p_impact, p_control, alpha = 0.05, power
   
   warning("Could not achieve target power within maximum sample size. Try increasing power_target tolerance or check effect size.")
   return(NULL)
+}
+
+# function may be a replicate, check
+calculate_fisher_exact <- function(total_deaths, total_n) {
+  # 3:1 allocation (impact:control) 
+  impact_n <- round(total_n * 0.75)
+  control_n <- total_n - impact_n
+  
+  # All observed deaths assumed to occur in impact group (worst case)
+  impact_deaths <- total_deaths
+  control_deaths <- 0  # Assume perfect control survival for boundary calculation
+  
+  # Calculate survivors
+  surv_impact <- impact_n - impact_deaths
+  surv_control <- control_n - control_deaths
+  
+  # Create survival matrix using your existing structure
+  # Row 1 = impact, Row 2 = control, Cols = [survived, died]  
+  survival_matrix <- matrix(c(surv_impact, impact_deaths, surv_control, control_deaths), 
+                            nrow = 2, byrow = TRUE)
+  
+  # One-sided test: H1 = impact survival < control survival (pump is harmful)
+  # alternative = "less" tests if impact survival is significantly lower
+  if (sum(survival_matrix) > 0 && all(rowSums(survival_matrix) > 0) && all(colSums(survival_matrix) > 0)) {
+    test_result <- fisher.test(survival_matrix, alternative = "less")
+    return(test_result$p.value)
+  } else {
+    return(1)  # No evidence if invalid matrix
+  }
+}
+
+# Find death thresholds for each analysis using p_to_z_calculator 
+find_death_thresholds <- function(sample_size, z_upper, z_lower) {
+  max_deaths <- ceiling(sample_size * 0.15)  
+  
+  # Find efficacy threshold (stop when >= this many deaths)
+  efficacy_threshold <- NA
+  for (deaths in 1:max_deaths) {
+    p_val <- calculate_fisher_exact(deaths, sample_size)
+    if (p_val > 0 && p_val < 1) {  
+      z_score <- qnorm(p_val, lower.tail = FALSE)
+      if (z_score >= z_upper) {
+        efficacy_threshold <- deaths
+        break
+      }
+    }
+  }
+  
+  # Find futility threshold (stop when <= this many deaths)
+  # We want the MAXIMUM number of deaths that still allows futility stopping
+  futility_threshold <- NA
+  for (deaths in max_deaths:0) {  # Search from high deaths down to 0
+    p_val <- calculate_fisher_exact(deaths, sample_size)
+    if (p_val > 0 && p_val < 1) {  
+      z_score <- qnorm(p_val, lower.tail = FALSE)  
+      if (z_score <= z_lower) {  # If this death count meets futility boundary
+        futility_threshold <- deaths  # This is the maximum deaths for futility
+        break  # Stop at first (highest) death count that meets criteria
+      }
+    }
+  }
+  
+  return(list(efficacy = efficacy_threshold, futility = futility_threshold))
+}
+
+#Enhanced function to show death estimates across multiple recapture rates
+show_recapture_death_spectrum <- function(comprehensive_boundaries, 
+                                          recapture_rates = seq(80, 100, by = 1)) {
+  
+  # Create expanded table showing death estimates at different recapture rates
+  results_list <- list()
+  
+  for(i in 1:nrow(comprehensive_boundaries)) {
+    row_data <- comprehensive_boundaries[i, ]
+    
+    # For futility boundary
+    if(!is.na(row_data$deaths_for_futility)) {
+      observed_futility <- row_data$deaths_for_futility
+      
+      futility_estimates <- data.frame(
+        analysis = row_data$analysis,
+        sample_size = row_data$sample_size,
+        boundary_type = "Futility",
+        original_deaths = observed_futility,
+        recapture_rate = recapture_rates,
+        estimated_deaths = sapply(recapture_rates, function(rate) {
+          if(rate == 100) return(observed_futility)
+          recaptured <- round(row_data$sample_size * rate / 100)
+          ht_estimate <- (observed_futility / recaptured) * row_data$sample_size
+          round(ht_estimate)
+        })
+      )
+      results_list[[paste0("futility_", i)]] <- futility_estimates
+    }
+    
+    # For efficacy boundary  
+    if(!is.na(row_data$deaths_for_efficacy)) {
+      # Use 1 less than efficacy threshold as starting observed deaths
+      observed_efficacy <- row_data$deaths_for_efficacy - 1
+      
+      efficacy_estimates <- data.frame(
+        analysis = row_data$analysis,
+        sample_size = row_data$sample_size,
+        boundary_type = "Efficacy",
+        original_deaths = observed_efficacy,
+        recapture_rate = recapture_rates,
+        estimated_deaths = sapply(recapture_rates, function(rate) {
+          if(rate == 100) return(observed_efficacy)
+          recaptured <- round(row_data$sample_size * rate / 100)
+          ht_estimate <- (observed_efficacy / recaptured) * row_data$sample_size
+          round(ht_estimate)
+        })
+      )
+      results_list[[paste0("efficacy_", i)]] <- efficacy_estimates
+    }
+  }
+  
+  # Combine all results
+  full_results <- do.call(rbind, results_list)
+  
+  # Add interpretation
+  full_results <- full_results %>%
+    mutate(
+      death_increase = estimated_deaths - original_deaths,
+      interpretation = case_when(
+        boundary_type == "Futility" & death_increase > 0 ~ paste0("Prevents futility stopping (+", death_increase, " deaths)"),
+        boundary_type == "Efficacy" & death_increase > 0 ~ paste0("Enables efficacy stopping (+", death_increase, " deaths)"),
+        TRUE ~ "No change"
+      )
+    )
+  
+  return(full_results)
+}
+
+
+
+find_recapture_boundary_effects <- function(comprehensive_boundaries, fixed_recapture = 90) {
+  
+  results <- comprehensive_boundaries %>%
+    select(analysis, sample_size, deaths_for_futility, deaths_for_efficacy) %>%
+    rowwise() %>%
+    mutate(
+      # FUTILITY PREVENTION: When does H-T push deaths UP and prevent futility stopping?
+      futility_prevention_recapture = if(!is.na(deaths_for_futility)) {
+        observed_deaths <- deaths_for_futility
+        # Find recapture rate where observed deaths round UP to next integer
+        critical_recaptured <- (observed_deaths * sample_size) / (observed_deaths + 0.5)
+        critical_rate <- critical_recaptured / sample_size
+        round(critical_rate * 100, 1)
+      } else NA,
+      
+      # EFFICACY FACILITATION: When does H-T push deaths UP to reach efficacy boundary?
+      efficacy_facilitation_recapture = if(!is.na(deaths_for_efficacy)) {
+        observed_deaths <- deaths_for_efficacy - 1  # Start with 1 less death
+        # Find recapture rate where (observed-1) deaths round UP to efficacy threshold
+        critical_recaptured <- (observed_deaths * sample_size) / (observed_deaths + 0.5)
+        critical_rate <- critical_recaptured / sample_size
+        if(critical_rate <= 1.0) round(critical_rate * 100, 1) else NA
+      } else NA,
+      
+      # FIXED RECAPTURE RATE ANALYSIS
+      # Futility at fixed recapture rate
+      futility_fixed_effect = if(!is.na(deaths_for_futility)) {
+        observed_deaths <- deaths_for_futility
+        recaptured <- round(sample_size * fixed_recapture / 100)
+        ht_estimate <- (observed_deaths / recaptured) * sample_size
+        estimated_deaths <- round(ht_estimate)
+        estimated_deaths - observed_deaths
+      } else NA,
+      
+      # Efficacy at fixed recapture rate
+      efficacy_fixed_effect = if(!is.na(deaths_for_efficacy)) {
+        observed_deaths <- deaths_for_efficacy - 1
+        recaptured <- round(sample_size * fixed_recapture / 100)
+        ht_estimate <- (observed_deaths / recaptured) * sample_size
+        estimated_deaths <- round(ht_estimate)
+        estimated_deaths - observed_deaths
+      } else NA,
+      
+      futility_prevention_text = if(!is.na(futility_prevention_recapture)) {
+        paste0("Recapture <", futility_prevention_recapture, "% prevents futility stopping (", 
+               deaths_for_futility, "→", deaths_for_futility + 1, " deaths)")
+      } else "No futility boundary",
+      
+      efficacy_facilitation_text = if(!is.na(efficacy_facilitation_recapture)) {
+        paste0("Recapture <", efficacy_facilitation_recapture, "% enables efficacy stopping (", 
+               deaths_for_efficacy - 1, "→", deaths_for_efficacy, " deaths)")
+      } else "High recapture needed",
+      
+      # Fixed recapture rate text
+      futility_prevention_text_fixed = if(!is.na(deaths_for_futility)) {
+        if(futility_fixed_effect > 0) {
+          paste0("At ", fixed_recapture, "% recapture: prevents futility stopping (", 
+                 deaths_for_futility, "→", deaths_for_futility + futility_fixed_effect, " deaths)")
+        } else {
+          paste0("At ", fixed_recapture, "% recapture: no effect on futility")
+        }
+      } else "No futility boundary",
+      
+      efficacy_facilitation_text_fixed = if(!is.na(deaths_for_efficacy)) {
+        if(efficacy_fixed_effect > 0) {
+          paste0("At ", fixed_recapture, "% recapture: enables efficacy stopping (", 
+                 deaths_for_efficacy - 1, "→", deaths_for_efficacy - 1 + efficacy_fixed_effect, " deaths)")
+        } else {
+          paste0("At ", fixed_recapture, "% recapture: no effect on efficacy")
+        }
+      } else "No efficacy boundary"
+    ) %>%
+    select(analysis, sample_size, deaths_for_futility, deaths_for_efficacy,
+           futility_prevention_recapture, efficacy_facilitation_recapture,
+           futility_prevention_text, efficacy_facilitation_text,
+           futility_prevention_text_fixed, efficacy_facilitation_text_fixed)
+  
+  return(results)
+}
+
+extract_gsdesign_boundaries <- function(gsdesign_obj) {
+  # Extract cumulative sample sizes
+  sample_sizes <- ceiling(gsdesign_obj$n.I)
+  
+  # Extract boundaries
+  upper_bounds <- gsdesign_obj$upper$bound
+  
+  # Check if lower bounds exist (for two-sided tests)
+  if (!is.null(gsdesign_obj$lower)) {
+    lower_bounds <- gsdesign_obj$lower$bound
+  } else {
+    lower_bounds <- rep(-Inf, length(upper_bounds))  # No futility stopping
+  }
+  
+  # Create boundary data frame
+  boundaries_df <- data.frame(
+    analysis = 1:length(sample_sizes),
+    sample_size = sample_sizes,
+    upper_bound = upper_bounds,
+    lower_bound = lower_bounds
+  )
+  
+  return(boundaries_df)
 }
 
 p_to_z_calculator <- function(p_value) {
@@ -842,8 +1081,119 @@ create_journey_plot_ht_comprehensive <- function(mortality_table,
   return(journey_plot)
 }
 
+plot_custom_gsdesign <- function(gsdesign_obj, title = NULL) {
+  # Extract boundary data
+  boundaries <- extract_gsdesign_boundaries(gsdesign_obj)
+  
+  # Set plot limits
+  x_max <- max(boundaries$sample_size) * 1.1
+  y_min <- min(boundaries$lower_bound) - 1
+  y_max <- max(boundaries$upper_bound) + 0.5
+  
+  # Create extended sample size sequence for smooth lines starting from first boundary
+  x_start <- min(boundaries$sample_size)
+  x_seq <- seq(x_start, x_max, length.out = 200)
+  
+  # Interpolate boundaries for smooth lines
+  upper_smooth <- approx(boundaries$sample_size, boundaries$upper_bound, 
+                         xout = x_seq, rule = 2)$y
+  lower_smooth <- approx(boundaries$sample_size, boundaries$lower_bound, 
+                         xout = x_seq, rule = 2)$y
+  
+  # Create extended line data that includes extreme points at first x-value
+  line_data_upper <- data.frame(
+    x = c(x_start, x_seq),
+    y = c(y_max, upper_smooth)  # Add extreme high point at first x
+  )
+  
+  line_data_lower <- data.frame(
+    x = c(x_start, x_seq), 
+    y = c(y_min, lower_smooth)  # Add extreme low point at first x
+  )
+  
+  ribbon_data <- data.frame(
+    x = x_seq,
+    upper = upper_smooth,
+    lower = lower_smooth
+  )
+  
+  p <- ggplot() +
+    # Green continue area extends from x=0 to first boundary
+    geom_ribbon(aes(x = c(0, x_start), ymin = y_min, ymax = y_max), 
+                fill = "lightgreen", alpha = 0.6) +
+    # Boundary-defined regions start from first analysis point
+    geom_ribbon(data = ribbon_data, 
+                aes(x = x, ymin = upper, ymax = y_max), 
+                fill = "lightblue", alpha = 0.6) +
+    geom_ribbon(data = ribbon_data, 
+                aes(x = x, ymin = lower, ymax = upper), 
+                fill = "lightgreen", alpha = 0.6) +
+    geom_ribbon(data = ribbon_data, 
+                aes(x = x, ymin = y_min, ymax = lower), 
+                fill = "lightcoral", alpha = 0.6) +
+    geom_vline(data = boundaries, 
+               aes(xintercept = sample_size), 
+               linetype = "dashed", color = "grey50", alpha = 0.7) +
+    geom_line(data = line_data_upper, aes(x = x, y = y), 
+              color = "darkblue", size = 0.8) +
+    geom_line(data = line_data_lower, aes(x = x, y = y), 
+              color = "darkred", size = 0.8) +
+    geom_point(data = boundaries, 
+               aes(x = sample_size, y = upper_bound), 
+               color = "darkblue", size = 2) +
+    geom_point(data = boundaries, 
+               aes(x = sample_size, y = lower_bound), 
+               color = "darkred", size = 2) +
+    # Add z-score labels above upper boundary points
+    geom_text(data = boundaries,
+              aes(x = sample_size, y = upper_bound, 
+                  label = paste(round(upper_bound, 2))),
+              vjust = -0.5, hjust = -0.6, size = 3) +
+    # Add z-score labels below lower boundary points  
+    geom_text(data = boundaries,
+              aes(x = sample_size, y = lower_bound,
+                  label = paste(round(lower_bound, 2))),
+              vjust = 0.6, hjust = -0.6, size = 3) +
+    # Add sample size labels below the plot area
+    geom_text(data = boundaries,
+              aes(x = sample_size, y = y_min,
+                  label = paste("n =", sample_size)),
+              vjust = -0.4, size = 3, hjust = -0.3, color = "black", angle = 45) +
+    geom_point(aes(x = gsdesign_obj$n.fix, y = 1.96), 
+               shape = 18, size = 3, color = "black") +
+    scale_x_continuous(limits = c(0, x_max),
+                       breaks = seq(0, x_max, by = 50),
+                       expand = c(0, 0)) +
+    scale_y_continuous(limits = c(y_min, y_max),
+                       breaks = seq(floor(y_min), ceiling(y_max), by = 0.5),
+                       expand = c(0, 0)) +
+    labs(
+      x = "Total Sample Size (3:1 impact:control)",
+      y = "Normal Critical Value (Z)"
+    ) +
+    annotate(
+      "text",
+      x = x_max * 0.98, 
+      y = y_max * 0.98, 
+      label = "Parameters:\nLan-DeMets O'Brien-Fleming\nlower bounds non-binding\nPower (1-β) = 80%\nα = 0.025 (one sided)",
+      hjust = 1,
+      vjust = 1,
+      size = 4,
+      color = "black"
+    ) +
+    
+    # Apply your custom theme
+    theme_JN() +
+    theme(
+      panel.grid.major = element_line(colour = "grey90", size = 0.5),
+      panel.grid.minor = element_blank()
+    ) +
+    coord_cartesian(clip = "off")
+  
+  return(p)
+}
 
-p_to_z_visualizer <- function(target_z = NULL, p_range = c(0.0000001, 0.1)) {
+p_to_z_visualizer <- function(target_z = NULL, p_range = c(0.0000001, 1)) {
   
   # Generate a sequence of p-values
   p_values <- seq(p_range[1], p_range[2], length.out = 1000)
@@ -855,7 +1205,7 @@ p_to_z_visualizer <- function(target_z = NULL, p_range = c(0.0000001, 0.1)) {
   plot(p_values, z_scores, type = "l", lwd = 2, col = "blue",
        xlab = "P-value", ylab = "Z-score",
        main = "Relationship between P-values and Z-scores",
-       xlim = c(0, max(p_values)), ylim = c(0, max(z_scores)))
+       xlim = c(0, max(p_values)), ylim = c(-2, max(z_scores)))
   
   grid()
   
@@ -902,6 +1252,255 @@ lookup_mortality_data <- function(mortality_table, sample_size, n_deaths) {
   }
   
   return(result)
+}
+
+
+# Core lookup function with exact original logic
+lookup_mortality_scenario <- function(mortality_table, 
+                                      sample_size = NULL, 
+                                      n_deaths = NULL, 
+                                      pct_difference = NULL,
+                                      decision_type = NULL,
+                                      current_sample = NULL) {
+  
+  result <- mortality_table
+  
+  # Handle different lookup types with original logic
+  if (!is.null(pct_difference) && is.null(sample_size) && is.null(n_deaths)) {
+    # Replacement for lookup_min_sample_pct_diff
+    target_survival <- 100 - pct_difference
+    result <- result %>%
+      filter(decision != "Continue") %>%  # Original filters out "Continue"
+      mutate(survival_diff = abs(survival - target_survival)) %>%
+      arrange(survival_diff, sample_size)
+  }
+  else if (!is.null(n_deaths) && !is.null(decision_type) && is.null(current_sample)) {
+    # Replacement for lookup_min_sample_fixed_deaths
+    result <- result %>%
+      filter(n_mortality == n_deaths, decision == decision_type) %>%
+      arrange(sample_size)
+  }
+  else if (!is.null(n_deaths) && !is.null(current_sample)) {
+    # Replacement for lookup_next_stopping_point
+    result <- result %>%
+      filter(sample_size > current_sample, n_mortality == n_deaths, decision == decision_type) %>%
+      arrange(sample_size)
+  }
+  else if (!is.null(sample_size) && !is.null(pct_difference)) {
+    # Replacement for lookup_ci_at_sample_size
+    mortality_rate <- pct_difference / 100
+    expected_deaths <- round(sample_size * mortality_rate)
+    result <- result %>%
+      filter(sample_size == !!sample_size, n_mortality == !!expected_deaths)
+  }
+  else if (!is.null(sample_size) && !is.null(decision_type)) {
+    # For rejection thresholds
+    result <- result %>%
+      filter(sample_size == sample_size, decision == decision_type) %>%
+      arrange(n_mortality)
+  }
+  
+  # Return appropriate result
+  result <- result %>%
+    select(sample_size, n_mortality, survival, ci_lower_surv, ci_upper_surv, 
+           decision, survival_formatted)
+  
+  if(nrow(result) == 0) {
+    return(NULL)
+  }
+  
+  return(result %>% slice_head(n = 1))
+}
+
+# Exact replacement for lookup_min_sample_pct_diff
+lookup_min_sample_pct_diff <- function(mortality_table, pct_difference) {
+  lookup_mortality_scenario(mortality_table, pct_difference = pct_difference)
+}
+
+# Exact replacement for lookup_min_sample_fixed_deaths  
+lookup_min_sample_fixed_deaths <- function(mortality_table, current_deaths) {
+  lookup_mortality_scenario(mortality_table, n_deaths = current_deaths, decision_type = "Accept H0")
+}
+
+# Exact replacement for lookup_next_stopping_point
+lookup_next_stopping_point <- function(mortality_table, current_sample, current_deaths) {
+  lookup_mortality_scenario(mortality_table, n_deaths = current_deaths, decision_type = "Accept H0", current_sample = current_sample)
+}
+
+# Exact replacement for lookup_ci_at_sample_size
+lookup_ci_at_sample_size <- function(mortality_table, sample_size, pct_difference) {
+  lookup_mortality_scenario(mortality_table, sample_size = sample_size, pct_difference = pct_difference)
+}
+
+# Exact replacement for lookup_rejection_threshold
+lookup_rejection_threshold <- function(mortality_table, current_sample, current_deaths, next_interval) {
+  reject_threshold <- lookup_mortality_scenario(mortality_table, sample_size = next_interval, decision_type = "Reject H0")
+  
+  if(is.null(reject_threshold)) {
+    cat("No rejection threshold found at", next_interval, "fish\n")
+    return(NULL)
+  }
+  
+  additional_deaths_needed <- reject_threshold$n_mortality - current_deaths
+  
+  tibble(
+    current_sample = current_sample,
+    current_deaths = current_deaths,
+    next_interval = next_interval,
+    rejection_threshold_deaths = reject_threshold$n_mortality,
+    additional_deaths_to_reject = additional_deaths_needed,
+    rejection_survival = reject_threshold$survival,
+    rejection_ci_upper = reject_threshold$ci_upper_surv
+  )
+}
+
+# Keep original show_continuation_scenarios as it's complex
+show_continuation_scenarios <- function(mortality_table, intervals = c(100, 200, 300, 400)) {
+  
+  scenarios <- tibble()
+  
+  for(current_interval in intervals[-length(intervals)]) {
+    next_interval <- intervals[which(intervals == current_interval) + 1]
+    
+    continue_cases <- mortality_table %>%
+      filter(sample_size == current_interval, decision == "Continue") %>%
+      filter(n_mortality <= 15) %>%
+      select(sample_size, n_mortality, survival, decision)
+    
+    for(i in seq_len(nrow(continue_cases))) {
+      current_deaths <- continue_cases$n_mortality[i]
+      current_survival <- continue_cases$survival[i]
+      
+      next_accept <- lookup_next_stopping_point(mortality_table, current_interval, current_deaths)
+      
+      next_reject_threshold <- mortality_table %>%
+        filter(sample_size == next_interval, decision == "Reject H0") %>%
+        slice_head(n = 1)
+      
+      scenario <- tibble(
+        current_interval = current_interval,
+        current_deaths = current_deaths,
+        current_survival = current_survival,
+        accept_at_n = if(!is.null(next_accept)) next_accept$sample_size[1] else NA,
+        accept_survival = if(!is.null(next_accept)) next_accept$survival[1] else NA,
+        next_interval = next_interval,
+        reject_threshold_deaths = if(nrow(next_reject_threshold) > 0) next_reject_threshold$n_mortality[1] else NA,
+        additional_deaths_to_reject = if(nrow(next_reject_threshold) > 0) 
+          next_reject_threshold$n_mortality[1] - current_deaths else NA
+      )
+      
+      scenarios <- scenarios %>% bind_rows(scenario)
+    }
+  }
+  
+  return(scenarios)
+}
+
+# Keep find_decision_thresholds as is (it works well)
+find_decision_thresholds <- function(mortality_table, intervals = c(100, 200, 300, 400)) {
+  
+  thresholds <- map_dfr(intervals, function(n) {
+    
+    interval_data <- mortality_table %>%
+      filter(sample_size == n) %>%
+      mutate(mortality_pct = round((n_mortality / sample_size) * 100, 1))
+    
+    last_accept <- interval_data %>% filter(decision == "Accept H0") %>% slice_tail(n = 1)
+    first_reject <- interval_data %>% filter(decision == "Reject H0") %>% slice_head(n = 1)
+    continue_range <- interval_data %>% filter(decision == "Continue") %>% 
+      summarise(min_continue_pct = min(mortality_pct), max_continue_pct = max(mortality_pct))
+    
+    tibble(
+      interval = n,
+      accept_threshold = if(nrow(last_accept) > 0) last_accept$mortality_pct else NA,
+      accept_deaths = if(nrow(last_accept) > 0) last_accept$n_mortality else NA,
+      reject_threshold = if(nrow(first_reject) > 0) first_reject$mortality_pct else NA,
+      reject_deaths = if(nrow(first_reject) > 0) first_reject$n_mortality else NA,
+      continue_min = if(!is.infinite(continue_range$min_continue_pct)) continue_range$min_continue_pct else NA,
+      continue_max = if(!is.infinite(continue_range$max_continue_pct)) continue_range$max_continue_pct else NA
+    )
+  })
+  
+  return(thresholds)
+}
+
+# Exact replacement for build_stopping_design_table
+build_stopping_design_table <- function(mortality_table, intervals = c(100, 200, 300, 400)) {
+  
+  map_dfr(intervals, function(n) {
+    
+    mortality_table %>%
+      filter(sample_size == n) %>%
+      mutate(
+        mortality_pct = round((n_mortality / sample_size) * 100, 1),
+        interval = n
+      ) %>%
+      select(interval, n_mortality, mortality_pct, survival, ci_lower_surv, 
+             ci_upper_surv, decision, survival_formatted)
+  })
+}
+
+# Exact replacement for build_comprehensive_stopping_table
+build_comprehensive_stopping_table <- function(mortality_table, intervals = c(100, 200, 300, 400)) {
+  
+  comprehensive_table <- tibble()
+  
+  for(i in seq_along(intervals)) {
+    current_interval <- intervals[i]
+    next_interval <- if(i < length(intervals)) intervals[i + 1] else NA
+    
+    interval_data <- mortality_table %>%
+      filter(sample_size == current_interval) %>%
+      mutate(mortality_pct = round((n_mortality / sample_size) * 100, 1))
+    
+    last_accept <- interval_data %>% filter(decision == "Accept H0") %>% slice_tail(n = 1)
+    first_reject <- interval_data %>% filter(decision == "Reject H0") %>% slice_head(n = 1)
+    continue_cases <- interval_data %>% filter(decision == "Continue") %>% filter(n_mortality <= 15)
+    
+    base_row <- tibble(
+      interval = current_interval,
+      accept_threshold_pct = if(nrow(last_accept) > 0) last_accept$mortality_pct else NA,
+      accept_max_deaths = if(nrow(last_accept) > 0) last_accept$n_mortality else NA,
+      reject_threshold_pct = if(nrow(first_reject) > 0) first_reject$mortality_pct else NA,
+      reject_min_deaths = if(nrow(first_reject) > 0) first_reject$n_mortality else NA,
+      continue_min_deaths = if(nrow(continue_cases) > 0) min(continue_cases$n_mortality) else NA,
+      continue_max_deaths = if(nrow(continue_cases) > 0) max(continue_cases$n_mortality) else NA,
+      next_interval = next_interval
+    )
+    
+    if(nrow(continue_cases) > 0 && !is.na(next_interval)) {
+      
+      if(nrow(continue_cases) <= 3) {
+        sample_cases <- continue_cases
+      } else {
+        sample_cases <- continue_cases %>%
+          slice(c(1, ceiling(nrow(continue_cases)/2), nrow(continue_cases)))
+      }
+      
+      for(j in seq_len(nrow(sample_cases))) {
+        current_deaths <- sample_cases$n_mortality[j]
+        current_survival <- sample_cases$survival[j]
+        
+        accept_point <- lookup_next_stopping_point(mortality_table, current_interval, current_deaths)
+        reject_at_next <- mortality_table %>% filter(sample_size == next_interval, decision == "Reject H0") %>% slice_head(n = 1)
+        
+        scenario_row <- base_row %>%
+          mutate(
+            scenario_current_deaths = current_deaths,
+            scenario_current_survival = current_survival,
+            accept_if_no_more_deaths_at_n = if(!is.null(accept_point)) accept_point$sample_size[1] else NA,
+            reject_if_deaths_reach = if(nrow(reject_at_next) > 0) reject_at_next$n_mortality[1] else NA,
+            additional_deaths_to_reject = if(nrow(reject_at_next) > 0) reject_at_next$n_mortality[1] - current_deaths else NA
+          )
+        
+        comprehensive_table <- bind_rows(comprehensive_table, scenario_row)
+      }
+    } else {
+      comprehensive_table <- bind_rows(comprehensive_table, base_row)
+    }
+  }
+  
+  return(comprehensive_table)
 }
 
 # Function to analyze real study data

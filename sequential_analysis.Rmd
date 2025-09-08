@@ -19,6 +19,7 @@ library(pwr)
 library(TOSTER)
 library(cowplot)
 library(gsDesign)
+library(rpact)
 #library(gganimate)
 #library(ggpubr)
 #library(gt)
@@ -304,7 +305,7 @@ browseURL(tmp)
 
 ```{r lookup_mort, eval = FALSE}
 # lookup specific rows (sample, mortality)
-lookup_mortality_data(mortality_data, 400, 7) 
+lookup_mortality_data(mortality_data, 200, 4) 
 lookup_mortality_data(mortality_data, 360, 7) 
 
 # need to add lookup for simulation results too, so we can quickly identify decision points
@@ -330,8 +331,8 @@ lookup_mortality_data(mortality_data, 360, 7)
 #Run with defaults first, then can input the assumed_true_survival (0.98) and recapture_rate_scenario (1) afterwards
 
 my_decisions <- lookup_seq_95(
-  exposed_fish = 300,
-  recaptured_fish = 270, 
+  exposed_fish = 200,
+  recaptured_fish = 200, 
   observed_deaths = 4,
   mortality_table = mortality_data,
   cumulative_data = cumulative_all
@@ -347,7 +348,7 @@ my_decisions <- lookup_seq_95(
 
 ## 2.5 Visualise trial outcomes
 
-Using the simulation output, we can now determine what scenarios are most likely to occur during sequential testing. This allows us to determine our stopping rate at given sample itnervals and given mortality estimates.
+Using the simulation output, we can now determine what scenarios are most likely to occur during sequential testing. This allows us to determine our stopping rate at given sample intervals and given mortality estimates.
 
 ```{r simulation_plot, eval=FALSE}
 
@@ -497,7 +498,8 @@ cumulative_all <- bind_rows(
 stopping_93_recap_all_methods <- cumulative_all %>%
   filter(
     true_survival_rate == 0.98,
-    recapture_rate == 0.93
+    recapture_rate == 1,
+    decision_method == 'neutral'
   ) %>%
   select(
     decision_method,
@@ -565,7 +567,8 @@ plot_cumulative_stopping(cumulative_all,
 #Plot specific scenario showing difference across recapture method
 stopping_plot2 <- plot_cumulative_stopping(cumulative_all,
                                           survival_filter = 0.98, 
-                                          recapture_filter = 0.9)
+                                          recapture_filter = 1,
+                                          decision_method_filter = "neutral")
 stopping_plot2
 
 
@@ -662,7 +665,7 @@ We may then consider two things (1) Where the 'grey zone' exists when we reject 
 
 ```{r sensitivity_plot, eval=FALSE}
 
-ht_summary <- create_stopping_summary_ht(ht_simulation_results)
+ht_summary <- cumulative_stopping_sum(ht_simulation_results)
 
 # Show how decision method affects outcomes across recapture rates
 sensitivity_data <- ht_summary$trial_overview %>%
@@ -721,7 +724,67 @@ ggsave(filename="sens_plot2.svg", plot=sens_plot2,
 ```
 
 
-#Need function for finding minimum sample size for given proportion and confidence interval estimate 
+```{r 95_ci_lookup, eval=FALSE}
+
+#Planning with 95% CI criteria
+
+#First, what's the minimum sample if we observe 100% survival?
+# n = 200 (lower bounds >98%)
+# Never study with less than 200
+
+# Plan for observing at least 2% mortality
+
+
+lookup_mortality_scenario(mortality_data, pct_difference = 4.1)
+
+reject_threshold <- lookup_mortality_scenario(mortality_data, sample_size = 300, decision_type = "Reject H0")
+additional_deaths_needed = reject_threshold$n_mortality - 4
+additional_deaths_needed
+
+lookup_mortality_scenario(mortality_data, sample_size = 178, pct_difference = 1.13)
+lookup_mortality_scenario(mortality_data, n_deaths = 5, decision_type = "Accept H0")
+lookup_mortality_scenario(mortality_data, n_deaths = 9, decision_type = "Accept H0", sample_size = 300)
+lookup_mortality_scenario(mortality_data, n_deaths = 9, decision_type = "Accept H0", current_sample = 300)
+
+analyze_continuation_scenarios(mortality_data, c(100, 200, 300, 400))
+show_continuation_scenarios(mortality_data, c(100, 200, 300, 400))
+build_stopping_design_table(mortality_data)
+build_comprehensive_stopping_table(mortality_data)
+thresholds <- find_decision_thresholds(mortality_data)
+continuation_only <- show_continuation_scenarios(mortality_data)
+
+# What actually happens at your intervals (100, 200, 300, 400)
+stopping_thresholds <- find_decision_thresholds(mortality_data, c(100, 200, 300, 400))
+
+continuation_table <- show_continuation_scenarios(mortality_data, c(100, 200, 300, 400))
+
+# At 200 fish with 4 deaths, how many more deaths trigger rejection at 300?
+lookup_rejection_threshold(mortality_data, current_sample = 200, current_deaths = 4, next_interval = 300)
+
+# Show all continuation scenarios (both acceptance and rejection paths)
+complete_scenarios <- show_continuation_scenarios(mortality_data, c(100, 200, 300, 400))
+
+comprehensive_table <- build_comprehensive_stopping_table(mortality_data, c(100, 200, 300, 400))
+
+write.csv(comprehensive_table, "comprehensive_table.csv", row.names = FALSE)
+
+
+# Suggests minimum n = 400
+# total expected mortality = 8
+# Sequential trial performed in intervals of 100
+
+# Get to interval 200, have observed 4 deaths (98%), can we stop?
+
+# No, require continuing to 253 without observing any further deaths e.g., we believe the true mortality is < 2% and therefore will decrease if we increase sample size to next stopping point
+
+# But we got to 253, and observed 2 extra deaths
+
+#Need to continue to 322
+
+#Consider the trade-off between estimate precision and statistical significance of inferiority test
+# At 97% sruvival, inferiority testign actually performs better than 95% CI rule
+
+```
 
 # 3. Hypothese testing
 
@@ -776,7 +839,7 @@ binom.test(x = 582, n = 600, p = 0.98, alternative = "less")
 ```{r compliance_power, eval = FALSE}
 
 result_greater <- find_compliance_sample_size(
-  true_rate = 0.99, 
+  true_rate = 1, 
   test_direction = "greater", 
   target_power = 0.8
 )
@@ -1006,13 +1069,13 @@ The test choice does not change as we are examining absolute % difference betwee
 ```{r inferiority_test, eval = FALSE}
 
 # Example data 98% survival at minimum sample size of 400 where 95% CI = 96.11% - 98.98%
-observed_impact_surv = 0.94
-impact_n = 243
+observed_impact_surv = 0.98
+impact_n = 450
 surv_impact <- observed_impact_surv*impact_n
 dead_impact <- impact_n - surv_impact
 
 observed_control_surv = 1
-control_n = 121 #approx 1:3
+control_n = 150 #approx 1:3
 surv_control <- observed_control_surv*control_n
 dead_control <- control_n - surv_control
 
@@ -1080,12 +1143,12 @@ Therefore we need two considerations:
 1. What does the power curve look like for each survival difference? This shows all the possible significant results and the respective power to detect them at a given sample size.
 2. What does the 80% power curve look like across each survival difference? This shows the minimum sample size required to achieve 80% power
 
-First, we can simulate specific scenarios for indivdual assesments.
+First, we can simulate specific scenarios for individual assessments.
 
 ```{r inferiority_power, eval = FALSE}
 
 # Test for any difference between groups when impact survival = 98%
-find_min_sample_size_fisher(p_impact = 0.99, p_control = 1,
+find_min_sample_size_fisher(p_impact = 0.97, p_control = 0.999999,
                                     alpha = 0.05, power_target = 0.8, 
                                     group_ratio = 3, step_size = 1, 
                                     alternative = "less")
@@ -1257,12 +1320,12 @@ inferiority_power_plot <- inferiority_power_results %>%
   )+
   labs(
     x = "Total Sample Size (Impact:Control 3:1 allocation)",
-    y = "Statistical Power"
+    y = "Power (1-β)"
   ) +
   annotate(
     "text",
-    x = 1800, 
-    y = 0.9, 
+    x = 1950, 
+    y = 0.99, 
     label = "Fisher's exact test (one-sided)\nPower (1-β) = 80%\nα = 0.05\nSamples = 1000",
     hjust = 1,
     vjust = 1,
@@ -1280,6 +1343,11 @@ inferiority_power_plot <- inferiority_power_results %>%
   coord_cartesian(clip = "off")
 
 inferiority_power_plot
+
+
+ggsave(filename = "./output/inferiority_power_plot.svg", plot = inferiority_power_plot,
+     units="cm",width=16,height=14)
+
 
 ```
 
@@ -1309,7 +1377,8 @@ browseURL(tmp)
 ```{r min_inferiority_results}
 
 #Follows 3:1 allocation as previous
-
+# Shows sample sizes required for 80% power at each % difference
+# Study design choice
 min_inferiority_results <- inferiority_power_results %>%
   filter(power >= 0.8) %>%
   group_by(pct_difference) %>%
@@ -1321,6 +1390,23 @@ min_inferiority_results <- inferiority_power_results %>%
 
 min_inferiority_results
 
+#Assuming a 3% difference, shows sample sizes required for power 0 - 100% and associated mortality
+# Study design choice
+power_curve_3pct <- inferiority_power_results %>%
+  filter(pct_difference == 3) %>%
+  mutate(
+    impact_deaths = round(n_impact * (pct_difference / 100)),
+    impact_survival_pct = round((n_impact - impact_deaths) / n_impact, 2)
+  ) %>%
+  arrange(n_total) %>%
+  group_by(impact_deaths) %>%
+  slice_head(n = 1) %>%  # First (smallest) sample size for each death count
+  ungroup() %>%
+  filter(impact_deaths >= 1 & impact_deaths <= 24) %>%  # Only deaths 1-14
+  select(n_total, n_control, n_impact, impact_deaths, impact_survival_pct, power) %>%
+  arrange(impact_deaths)
+
+power_curve_3pct
 ```
 
 
@@ -1358,7 +1444,7 @@ min_inferiority_plot <- min_inferiority_results %>%
   ) +
     annotate(
     "text",
-    x = 18, 
+    x = 19, 
     y = 1800, 
     label = "Fisher's exact test (one-sided)\nPower (1-β) = 80%\nα = 0.05\nSamples = 1000",
     hjust = 1,
@@ -1381,6 +1467,12 @@ min_inferiority_plot <- min_inferiority_results %>%
   coord_cartesian(clip = "off")
 
 min_inferiority_plot
+
+
+
+ggsave(filename = "./output/min_inferiority_plot.svg", plot = min_inferiority_plot,
+     units="cm",width=16,height=14)
+
 
 ```
 
@@ -1416,111 +1508,132 @@ This is the real cost of alpha spending to ensure we do not commit Type I error.
 
 Bottom line = if study designed for smaller effect, we can stop early, but requires more fish than if study designed for larger effect size
 
+
+Design for a 3% difference
+
 Requirements:
 
 One sided Fisher's exact test (H1: p_impact < p_control)
-Alpha = 0.05
+Alpha = 0.025
 Beta = 0.20
-Spending function O'Brien-Fleming 
+Spending function O'Brien-Fleming
+Non-binding lower futility
 Allocation 3:1 impact:control
-Interim analyses every 100 fish
-Number for a fixed sample design = 908
-
-What is the endpoint design (normal or binomial)?
+Interim analyses with 6 stops
+Number for a fixed sample design = 600
 
 
 ```{r group_seq_design}
 
-# One-sided, 10 interim analyses, Pocock boundaries based on observing a 2% impact:control difference.
-pcock_2perc_design <- gsDesign(
-  k = 10,                # Number of interim analyses
-  test.type = 1,        # 1 = one-sided (H1: p_impact < p_control)
-  alpha = 0.05,         # Type I error
-  beta = 0.20,          # Type II error (Power = 80%)
-  sfu = "Pocock",            # O'Brien-Fleming spending function
-  n.fix = 908 # Fixed sample design informed by power analysis = total sample of 908
+# Build the group sequential design based on a 3% difference with a fixed sample of 600
+
+OF_3_percent_fixed <- gsDesign(
+  k = 6,
+  test.type = 4,  
+  alpha = 0.025,
+  beta  = 0.20,
+  sfu   = sfLDOF,        
+  sfl   = sfLDOF,        
+  n.fix = 600
 )
 
-# One sided test will only present upper boundary for type I error. 
-# We do not need lower boundary for futility if we are only interested in detecting a one.sided effect (pump survival less than control) - is this correct?
+#plot(OF_3_percent_fixed, plottype = 2)
+# plot(OF_3_percent_fixed, plottype = 1) +
+#   scale_x_continuous(limits = c(0,710),
+#                      breaks = seq(0, 710, by = 50),
+#                      expand = c(0,0)) + 
+#   scale_y_continuous(limits = c(-3,6),
+#                      breaks = seq(-3, 6, by = 0.5),
+#                      expand = c(0,0)) +
+#    labs(
+#     y = "Normal Critical Value (Z)",
+#     x = "Total Sample Size (3:1 impact:control)"
+#   ) +
+#   annotate(
+#     "text",
+#     x = 700, 
+#     y = 5.9, 
+#     label = "Parameters:\nLan-DeMets O'Brien-Fleming\nlower bounds non-binding\nPower (1-β) = 80%\nα = 0.025 (one sided)",
+#     hjust = 1,
+#     vjust = 1,
+#     size = 4,
+#     color = "black"
+#   ) +
+#   theme_JN() +
+#   theme(title = element_blank())+
+#   coord_cartesian(clip = "off")
 
-# Print stopping boundaries (upper bounds are for efficacy)
-#print(pcock_2perc_design)
+#Plot the design including fixed critical point
 
-pocock_boundaries_table <- data.frame(
-  analysis = 1:10,
-  sample_size = ceiling(pcock_2perc_design$n.I),
-  z_boundary = round(pcock_2perc_design$upper$bound, 3),
-  p_boundary = round(pnorm(pcock_2perc_design$upper$bound, lower.tail = FALSE), 4)
-)
+# Use custom GSDESIGN boundary extraction and plotting
+OF_plot <- plot_custom_gsdesign(OF_3_percent_fixed)
 
-pocock_boundaries_table
+# Display the plot
+print(OF_plot)
 
-plot(pcock_2perc_design, plottype = 1)
-# Shows our critical threshold of 2.27 and stopping points. Note that if we go to our final 'look', we have increased sample size from 908 to 1214 due to the penalty/alpha spend
+ggsave(filename = "./output/OF_plot.svg", plot = OF_plot,
+     units="cm",width=16,height=14)
 
-#plot(design, plottype = 2)
-#plot(design, plottype = 3)
-#plot(design, plottype = 4)
-#plot(design, plottype = 6)
+# One sided test will only present upper boundary for type I error. Use asymmetric for efficacy and futility  
+# Don't be confused with the use of 'one.sided' it isn't the same as for fisher test. It means you only have upper boundary for efficacy, no lower bounder. 
 
 ```
 
-Visualize the stopping boundary/sample size needed
-These plots need work, just needs to replicate the plot from gsDesign but with a cleaner appearance
 
-```{r pocock_boundaries_plot}
+```{r rpact, eval=FALSE}
 
-p_boundaries <- boundaries_table %>%
-  ggplot(aes(x = analysis, y = z_boundary)) +
-  geom_line(size = 1.5, color = "red") +
-  geom_point(size = 4, color = "red") +
-  geom_text(aes(label = paste("Z =", z_boundary)), 
-            vjust = -0.5, size = 3.5, fontface = "bold") +
-  geom_hline(yintercept = 1.96, linetype = "dashed", alpha = 0.6) +
-  scale_x_continuous(breaks = 1:10, labels = paste("Analysis", 1:10)) +
-  #scale_y_continuous(breaks = seq(1.5, 4, by = 0.5), limits = c(1.5, 4.2)) +
-  labs(
-    title = "Sequential Stopping Boundaries for 2% Difference",
-    subtitle = "Stop if your Z-score exceeds the red line at any analysis",
-    x = "Interim Analysis",
-    y = "Z-score Boundary (Stop if Z > this value)",
-    caption = "Dashed line = traditional fixed study boundary (Z = 1.96)"
-  ) +
-  theme_minimal() +
-  theme(
-    plot.title = element_text(face = "bold", size = 14),
-    axis.text = element_text(size = 11),
-    panel.grid.minor = element_blank()
-  ) +
-  annotate("text", x = 3.5, y = 2.1, 
-           label = "Fixed study\nboundary", 
-           size = 3, alpha = 0.7)
+#Unused rpact design
 
-p_boundaries
+impact_survival  <- 0.97              # 3% harm
+delayed_mortality <- 0.005            # 0.5% delayed deaths
+delayed_fraction  <- delayed_mortality / (1 - impact_survival + delayed_mortality)  # ≈ 0.14
 
-p_sample_sizes <- boundaries_table %>%
-  ggplot(aes(x = analysis, y = sample_size)) +
-  geom_line(size = 1.5, color = "blue") +
-  geom_point(size = 4, color = "blue") +
-  geom_text(aes(label = paste(sample_size, "fish")), 
-            vjust = -0.5, size = 3.5, fontface = "bold") +
-  scale_x_continuous(breaks = 1:10, labels = paste("Analysis", 1:10)) +
-  scale_y_continuous(breaks = seq(0, 1000, by = 100)) +
-  labs(
-    title = "Sample Sizes for Each Interim Analysis",
-    subtitle = "When to conduct each interim look",
-    x = "Interim Analysis",
-    y = "Total Sample Size"
-  ) +
-  theme_minimal() +
-  theme(
-    plot.title = element_text(face = "bold", size = 14),
-    axis.text = element_text(size = 11),
-    panel.grid.minor = element_blank()
-  )
+design <- getDesignGroupSequential(
+  kMax = 6, 
+  sided = 1,
+  alpha = 0.05,
+  beta = 0.2,
+  typeOfDesign = "asHSD",
+  typeBetaSpending = "bsHSD", 
+  gammaA = -2,
+  gammaB = -2,
+  delayedInformation = delayed_fraction,
+  allocationRatioPlanned = 3  # 3:1 ratio impact:control
+)
+plot(design, showPower = TRUE)
+summary(design)
 
-p_sample_sizes
+
+getSampleSizeRates(
+  alpha = 0.025,
+  beta = 0.2,
+  sided = 1,
+  pi1 = 0.97,     # impact survival  
+  pi2 = 0.999,    # control survival
+  design = design,
+  allocationRatioPlanned = 3
+)
+
+```
+
+
+#### 3.2.6.1 Z-boundaries
+
+```{r OF_boundaries_table}
+
+# Extract key values and convert z-scores to p values
+OF_boundaries_table <- data.frame(
+  analysis = 1:6,
+  sample_size = ceiling(OF_3_percent_fixed$n.I),
+  z_boundary_upper = round(OF_3_percent_fixed$upper$bound, 3),
+  p_boundary_upper = round(pnorm(OF_3_percent_fixed$upper$bound, lower.tail = FALSE), 4),
+  z_boundary_lower = round(OF_3_percent_fixed$lower$bound, 3),
+  p_boundary_lower = round(pnorm(OF_3_percent_fixed$lower$bound, lower.tail = FALSE), 4)
+)
+
+OF_boundaries_table
+
+#write.csv(OF_boundaries_table, "OF_boundaries_table.csv", row.names = FALSE)
 
 ```
 
@@ -1528,42 +1641,103 @@ At each planned stopping interval (given in pocock_boundaries_table), calculate 
 
 ```{r p_to_z}
 
-# Visualise what the stopping p value looks like for the givn z threshold
-p_to_z_visualizer(target_z = 2.27)
+# Visualise what the stopping p value looks like for the given z threshold
+p_to_z_visualizer(target_z = 1.16)
 
-# Using an example where we are interval 3 (total sample size = 364)
-# We have observed 6% survival difference in our impact group, can we stop?
+# Calculate Fisher's exact, then convert p value to z value
 
-observed_impact_surv = 0.94
-impact_n = 243
-surv_impact <- observed_impact_surv*impact_n
-dead_impact <- impact_n - surv_impact
-
-observed_control_surv = 1
-control_n = 121 #approx 1:3
-surv_control <- observed_control_surv*control_n
-dead_control <- control_n - surv_control
-
-survival_matrix <- matrix(c(surv_impact, dead_impact, surv_control, dead_control), 
-                             nrow = 2, byrow = TRUE)
-fisher.test(survival_matrix, alternative = "less")
-
-#p-value = 0.002009
-
-#This exceeds the fixed p value threshold of 0.0116, so we know we can stop
-# lets check the Z score anyways
-
-p_to_z_calculator(0.002009)
-
-#Z-score: 2.877 
-# We can safely stop the test early and accept our result
+p_to_z_calculator(0.1315)
 
 ```
 
+```{r mort_calc}
 
-## 3.5 Equivelance testing
+# get N mortality for given proportion
+total <- 541
+mortality_difference <- total * 0.02
+mortality_difference <- round(mortality_difference)  # Since fish die in integers
+mortality_difference
 
-### 3.5.1 Test
+# get % survival for given N
+total <- 178
+mortality <- 2
+survival_pct <- ((total - mortality) / total) * 100
+survival_pct
+
+#Recapture inflation calculator
+original_sample_size = 175
+expected_recapture_rate = 0.85
+adjusted_sample_size <- ceiling(original_sample_size / expected_recapture_rate)
+adjusted_sample_size
+
+```
+
+#### 3.2.6.1 Efficacy/Futility
+
+Calculate the required mortality to stop for efficacy or futility at each interim stage
+
+```{r eff_fut}
+
+# Create comprehensive boundaries table with death thresholds
+OF_boundaries_table_deaths_eff_fut <- OF_boundaries_table %>%
+  rowwise() %>%
+  mutate(
+    thresholds = list(find_death_thresholds(sample_size, z_boundary_upper, z_boundary_lower)),
+    deaths_for_efficacy = thresholds$efficacy,
+    deaths_for_futility = thresholds$futility,
+    impact_n = round(sample_size * 0.75),
+    # Calculate survival percentages
+    min_eff_survival = if(!is.na(deaths_for_efficacy)) round((impact_n - deaths_for_efficacy) / impact_n * 100, 2) else NA,
+    max_fut_survival = if(!is.na(deaths_for_futility)) round((impact_n - deaths_for_futility) / impact_n * 100, 2) else NA,
+    decision_rule = case_when(
+      is.na(deaths_for_futility) && is.na(deaths_for_efficacy) ~ "Continue (no boundary reached)",
+      is.na(deaths_for_futility) ~ paste0("Stop for efficacy if ≤", min_eff_survival, "% survival (≥", deaths_for_efficacy, " deaths); otherwise continue"),
+      is.na(deaths_for_efficacy) ~ paste0("Stop for futility if ≥", max_fut_survival, "% survival (≤", deaths_for_futility, " deaths); otherwise continue"),
+      TRUE ~ paste0("Stop for futility if ≥", max_fut_survival, "% survival (≤", deaths_for_futility, " deaths); stop for efficacy if ≤", min_eff_survival, "% survival (≥", deaths_for_efficacy, " deaths); otherwise continue")
+    )
+  ) %>%
+  select(-thresholds)
+
+print(OF_boundaries_table_deaths_eff_fut)
+
+# Create a cleaner summary table
+summary_table <- OF_boundaries_table_deaths_eff_fut %>%
+  select(analysis, sample_size, deaths_for_futility, deaths_for_efficacy, 
+         z_boundary_lower, z_boundary_upper, p_boundary_lower, p_boundary_upper) %>%
+  mutate(
+    impact_n = round(sample_size * 0.75),
+    control_n = sample_size - impact_n
+  )
+
+print(summary_table)
+
+```
+
+#### 3.2.6.2 Recapture effects
+
+Determine the influence of recapture rate on efficacy and futility stopping e.g., when we have na imperfect recapture rate, which recapture rate causes disproportionate loss of futility bounds or increase in efficacy bounds?
+
+```{r recapture_eff_fut}
+
+# Create the spectrum analysis
+mortality_recap_eff_fut <- show_recapture_death_spectrum(OF_boundaries_table_deaths_eff_fut)
+print(death_spectrum)
+
+write.csv(mortality_recap_eff_fut, "mortality_recap_eff_fut.txt")
+
+# Create an enhanced table with 90% fixed recapture analysis
+mortality_recap_eff_fut_fixed <- find_recapture_boundary_effects(OF_boundaries_table_deaths_eff_fut, fixed_recapture = 90)
+print(recapture_effects_table)
+
+write.csv(mortality_recap_eff_fut_fixed, "recapture_effects_table.txt")
+
+```
+
+## 3.4 Equivelance testing
+
+### 3.4.1 Test
+
+Not used here, but kept fore exemplification
 
 Equivalence test: Is pump performance within 2% of background mortality (our new accepted standard based on control background mortality)? This approaches uses TOST but is unlikely to be suitable here because it is a very conservative approach. The test requires the entire confidence interval to fit within the given equivalence bounds. Therefore, sample sizes are likely to be very large and an even higher demand than difference or inferiority testing.
 
@@ -1581,7 +1755,7 @@ TOSTtwo.prop(prop1 = 0.9,      # e.g., 0.94
 
 ```
 
-### 3.5.1 Power
+### 3.4.2 Power
 
 ```{r tost_power, eval = FALSE}
 
@@ -1598,6 +1772,13 @@ powerTOSTtwo.prop(alpha = 0.05,
 
 ```
 
+To-do
+
+3. H-T calculator for live assessments
+4. Control mortality adjustment
+
+
+# 4. Fish Survival Assessment Decision Workflow
 
 Overall, our entire fish survival framework comes down to five considerations.
 
@@ -1615,3 +1796,4 @@ Overall, our entire fish survival framework comes down to five considerations.
   
 - Pocock grouped sequential design
   The primary method for controlling alpha spend with interim analysis.
+
